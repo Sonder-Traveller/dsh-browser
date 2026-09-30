@@ -544,10 +544,43 @@ export interface BrowserProvider {
     restoreAuth(session: BrowserSessionId, cookies: readonly ExportedCookie[]): Promise<number>;
     /** Return the session's chronological operation log. */
     history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
+    /**
+     * Persisted visits, newest first: what survives the browser process, so a
+     * human or an Agent can find a page again after the interface was closed.
+     * @param options - result cap and an optional hostname filter.
+     * @returns the retained visits (empty when history is disabled).
+     */
+    visited(options?: {
+        readonly limit?: number;
+        readonly domain?: string;
+    }): readonly VisitedPage[];
+    /**
+     * Optional: whether a session is still live. A session can end outside the
+     * tool layer — the human closed the browser window — so a cached id must be
+     * checked before it is reused. Providers that never end a session on their own
+     * can omit this, and callers treat absence as "still live".
+     * @param session - the session id to test.
+     */
+    exists?(session: BrowserSessionId): boolean;
     /** Replay one recorded operation by sequence number. */
     replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Close the session and destroy its backing surface. Idempotent. */
     close(session: BrowserSessionId): Promise<void>;
+}
+/**
+ * One visited page in the persistent browsing history — the durable record that
+ * outlives sessions, unlike {@link BrowserHistoryEntry}, which is a
+ * session-scoped operation log (navigate/click/type/…).
+ */
+export interface VisitedPage {
+    /** Epoch milliseconds when the visit was recorded. */
+    readonly at: number;
+    /** Absolute URL of the visited document. */
+    readonly url: string;
+    /** Document title at visit time, when the page exposed one. */
+    readonly title?: string;
+    /** Session/task label that drove the visit, when the provider knows it. */
+    readonly session?: string;
 }
 /** One recorded browser operation, in chronological order (seq 1, 2, 3…). */
 export interface BrowserHistoryEntry {

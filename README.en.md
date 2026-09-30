@@ -18,7 +18,7 @@
 | --- | --- |
 | Why a shared real browser, and how it differs from headless approaches | [Why a shared real browser](docs/why-browser.md) |
 | Installation, configuration, day-to-day use | [User guide](docs/user-guide.md) |
-| All 33 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
+| All 34 tools: parameters, output, examples | [Tool reference](docs/tool-reference.md) |
 | How the seam / provider / tools layers and self-hosting work | [Architecture](docs/architecture.md) |
 | Documentation index and README split | [Docs index](docs/README.md) |
 
@@ -28,7 +28,7 @@
 
 - **A real view, not a relay**: the browser is a native `WebContentsView`; the human sees every step the agent takes and can grab control at any time;
 - **Install-and-use**: with a desktop shell the shell's embedded view is used; on plain `dsh web` the plugin **self-hosts** — it spawns its own Electron window with zero extra configuration;
-- **One plugin, one toolset**: after install the agent automatically gets 33 `browser_*` tools (open, a11y tree, wait, semantic/coordinate interaction, scroll, back/forward, batch and single-control form filling, keys, structured scraping, screenshot, download, auth management…).
+- **One plugin, one toolset**: after install the agent automatically gets 34 `browser_*` tools (open, a11y tree, wait, semantic/coordinate interaction, scroll, back/forward, batch and single-control form filling, keys, structured scraping, screenshot, download, auth management…).
 
 In one sentence: **installing the plugin gives you a real browser that is shared with the user and drivable by the agent.**
 
@@ -117,6 +117,26 @@ See the full list in [Tool reference](#tool-reference).
       <p><code>browser_screenshot</code> supports <code>savePath</code> to write the PNG to disk, ready for vision models (modlens etc.) to locate elements visually.</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>Searchable browsing history</h3>
+      <p><code>browser_visited</code> reads the <b>persistent</b> record of visited pages (stored beside the browser profile, so it survives closing the browser and restarting DSH), filterable by domain and reopenable. It is a different thing from <code>browser_history</code>, which is the session's operation log.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Synthetic cursor</h3>
+      <p>While the agent works, a virtual pointer and click ripple are drawn inside the page — <b>its appearance means the agent has taken over that tab</b>. DOM-level actions (set value, check, select) also show a landing point. Can be switched off in settings.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>A "Browser" section in Settings</h3>
+      <p>Keep history / keep cookies / auto-expand the side panel / close the browser when a session ends / show the cursor / vision strategy / allow credential reads — switches take effect <b>immediately</b>, no restart.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>Unambiguous teardown</h3>
+      <p><b>Closing the browser window ends that session</b> (the next open is a clean one) while browsing history and login state survive; <b>collapsing the interface is only a collapse</b> and the browser keeps running in the background.</p>
+    </td>
+  </tr>
 </table>
 
 ## Why this plugin
@@ -135,6 +155,7 @@ See the full list in [Tool reference](#tool-reference).
 | `browser_snapshot` | Numbered inventory of interactive elements (inputs/buttons/links; pierces same-origin iframes and Shadow DOM) | – |
 | `browser_a11y` | Accessibility tree: semantic role/name/value/states + coordinates per interactive node (pierces same-origin iframes and Shadow DOM) | – |
 | `browser_execute` | Run JS in the page; args arrive as `arguments[0..n]` | ✅ |
+| `browser_visited` | Read the persistent browsing history (visited pages, filterable by domain / capped); reopen with `browser_open` | – |
 | `browser_content` | Fetch the page as html / markdown / txt / json (selector, maxChars, timeoutMs) | – |
 | `browser_click` | Click a semantic target (`target`: css/text/xpath, scrolls into view and clicks center) or viewport coordinates (vision-located) | ✅ |
 | `browser_type` | Type text (optionally focusing a `target` element first; CDP `Input.insertText`) | ✅ |
@@ -243,6 +264,25 @@ The browser's **visible view**, the **browser column layout**, and the **column-
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
 
+## Updating (the two hosts differ)
+
+The plugin has one installation per host, and the two are updated separately — **updating one does not update the other**.
+
+**Desktop (DSH Desktop)**
+- The plugin is a dependency of the desktop profile (usually `$DSH_HOME/profiles/desktop`). Updating means moving that dependency to the new version and then **restarting DSH Desktop**, which is when the settings panel and the tools pick up the new code.
+- The browser engine is the desktop app's own Electron; the plugin never downloads a second copy.
+- Upgrading the desktop app itself does not carry the plugin along; update it as described above.
+
+**Web (`dsh web`)**
+- The plugin is a dependency of the web profile (`$DSH_HOME/profiles/web`); **restart `dsh web`** after updating.
+- There is no desktop shell, so the shared browser is self-hosted by the plugin: the first install may need an Electron binary. If the package manager's build allow-list blocked it (pnpm v10+ blocks `electron`'s postinstall), run `npx install-electron` once to fetch it.
+- Update it the same way you installed it (npm package `dsh-builtin-browser`, the GitHub repo `wqty123/dsh-browser`, or a local directory).
+
+**What is the same on both**
+- The toolset (34 `browser_*` tools), the "Browser" section in Settings, and how browsing history and cookies persist are identical; only the carrier of the browser window differs (desktop shell vs. plugin-hosted).
+- Upgrading loses no data: history and settings live in `$DSH_HOME/dsh-builtin-browser-host/` (`history.jsonl`, `settings.json`), and login state sits in the same profile directory.
+- If history behaves unexpectedly after an upgrade, check **Settings → Browser**: history defaults to **on**, one-time auto-expand defaults to **on**, and closing the browser when a session ends defaults to **off**.
+
 ## Known limitations
 
 - JPEG screenshots are available only on the self-hosted native path (`capturePage` `toJPEG`); the desktop shell's CDP fallback stays PNG (CDP JPEG hangs on Electron 43).
@@ -314,6 +354,9 @@ Code layout:
 
 | 19 | 2026-10-01 | **DSH 0.2 compatibility**: DSH moved to the 0.2 line (`@deepseek-ai/dsh@0.2.0-rc.2`, with `dsh-llm`/`dsh-tools`/`dsh-system-prompt` following to `0.2.0-rc.2`), while our declaration `>=0.1.1-rc.1 <0.2.0` shut 0.2 out → verified the plugin's (narrow) runtime dependency surface against a **real 0.2.0-rc.2 host** (`cordis` Context/Service, `dsh-tools` defineTool, `dsh-llm` HarnessError, `schemastery`) and found no breaking change: session, navigation, snapshot and the screenshot trio (outside-path refused / legal write / overwrite refused) all pass → peer ranges for the three dsh packages widened to `>=0.1.1-rc.2 <0.3.0`, `dsh.compatibility.dsh` widened to `>=0.1.1-rc.1 <0.3.0`, and `dshReleases` gained `0.2.0-rc.1`/`0.2.0-rc.2` = compatible |
 | **0.1.23** | 2026-10-01 | **Release**: round 18 (PR #15: the Windows synthesized-input trio + Electron probe self-healing + locate verdicts) and round 19 (DSH 0.2 compatibility) ship as **0.1.23** (build clean, **47/47 tests pass**, tag `v0.1.23`) |
+| Round 20 | 2026-10-01 | **Browsing history / settings panel / synthetic cursor / teardown**: (1) **persistent browsing history** (`history-store`: append-only JSONL beside the browser profile; capped at 5000 entries or 90 days, whichever comes first; a damaged line loses only itself) plus the new **`browser_visited`** tool (tool count **33 → 34**), reopening via `browser_open`; (2) a "Browser" section in Settings (hand-written client bundle registered into `settings.section` with `order: 60`, below the host's own rows) served by `GET/PUT /dsh-builtin-browser/settings` (same-origin guard, 64 KiB cap) over a `settings-store` document (per-field validation, unknown keys dropped, malformed file falls back to defaults) — **switches take effect immediately** because the provider reads the document on every use; (3) an in-page **synthetic cursor** (inline styles + Web Animations, so a page's `style-src` CSP cannot drop it; `buildTargetScript` now attaches the element centre as `__point`, which gives click / type / setValue / check / select / clear **a landing point**) — **its appearance means the agent has taken over that tab**; (4) **closing a window ends its session**: on `closed` the host releases every view's `webContents` (a BrowserWindow does not destroy child views, so each window would otherwise leak a renderer) and reports `viewClosed`; the provider ends that session and the seam gains `exists()` so the tool layer re-checks a cached session — the next call gets a **clean session** while browsing history and login state survive. 21 new tests (**68/68 pass**) |
+| Round 20 addendum | 2026-10-01 | **Root cause of the invisible settings panel, plus crash diagnostics**: (1) On a real host the panel did not appear — the cause is that all three `cordis.patch.yml` rows were registered under **subpath** names (`dsh-builtin-browser/browser`), while the host's client-module scan resolves a row's specifier to a **package root** (`exactPackageSpecifier` returns `undefined` as soon as it sees a `/`), leaving the package with no row to read its `dsh.client` from. Fixed by adding an inert root row under the bare package name and giving the root entry `export const name` plus an empty `apply()`. Measured: boot entries 67 → **68**, the panel appears below "规则设定", and switches persist immediately. (2) Three host-log defects fixed: ISO timestamps, both paths plus their existence recorded before spawning, and a 2 MiB rotation that leaves a dated marker instead of wiping the file (which is how weeks of history vanished); the `exit` line gained `pid=` and `entryExists=` so "present at spawn, absent at exit" names an installation replaced underneath a running host. (3) Test pollution of the real log fixed: three spawn-based tests restored `DSH_HOME` in a `finally` while `dispose()` kills children asynchronously, so their synthetic exit lines landed in the operator's real log — now isolated at module scope. **70/70 tests** |
+| **0.2.0** | 2026-10-01 | **Release**: round 20 (persistent browsing history / the "Browser" settings section / synthetic cursor / teardown semantics) and its addendum ship as **0.2.0** — tool count **33 → 34** (new `browser_visited`), plus a new "Browser" section in Settings. Build clean, **70/70 tests pass**, tag `v0.2.0` |
 
 > The npm badge at the top is the authority on the registry's latest version: `0.1.23` is committed and tagged; if the badge still reads `0.1.22`, that version is not published yet.
 

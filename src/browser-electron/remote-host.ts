@@ -440,12 +440,28 @@ class ElectronChildClient {
     private readonly token: string,
     private readonly onExit?: () => void,
     private readonly onUserAction?: (action: BrowserUserAction) => void,
+    /**
+     * Called when the human closes a browser window. The session it showed is
+     * over: the provider releases it, while history and login state stay on disk
+     * so the next open is a clean session rather than a resurrected one.
+     */
+    private readonly onViewClosed?: (windowId: string) => void,
     /** Test seam: the executable to spawn instead of the resolved Electron
      *  binary. Absent -> resolveElectronPath() (production behavior). */
     private readonly executable?: string,
   ) {
     const electron = this.executable ?? resolveElectronPath()
+    // Record what is about to be spawned — with existence checks — BEFORE the
+    // attempt. When Electron cannot load the app entry it exits 1 with EMPTY
+    // stderr, and that signature is otherwise indistinguishable from a missing
+    // binary: writing both paths (and whether they exist) in advance is what
+    // turns the next occurrence into a named cause instead of a guess.
     process.stderr.write(`[dsh-browser host] spawning electron: ${electron}\n`)
+    appendHostLog(
+      `${hostStamp()} spawning: electron=${electron} (exists=${String(existsSync(electron))})`
+      + ` hostMain=${this.hostMainPath} (exists=${String(existsSync(this.hostMainPath))})`
+      + ` port=${String(this.port)}\n`,
+    )
     // ELECTRON_RUN_AS_NODE (even an empty string) makes Electron run as plain
     // Node, breaking require('electron'); NODE_OPTIONS can inject flags that
     // break the child. Rebuild the env without either.
@@ -482,15 +498,26 @@ class ElectronChildClient {
     // A failed spawn (bad/corrupt binary) emits 'error' — without a listener
     // that would crash the whole DSH process.
     this.child.on('error', error => {
-      const line = `spawn error: ${String(error)}`
+      const line = `${hostStamp()} spawn error: ${String(error)} electron=${electron} hostMain=${this.hostMainPath}`
       process.stderr.write(`[dsh-browser host] ${line}\n`)
       appendHostLog(`${line}\n`)
       this.fail(new Error(`dsh-builtin-browser: browser host failed to start: ${String(error)}`))
     })
     this.child.on('exit', (code, signal) => {
       // The exit code/signal is the other half of a crash report; without it a
-      // restart loop is indistinguishable from a clean stop.
-      const line = `browser host exited (code=${String(code)} signal=${String(signal)})`
+      // restart loop is indistinguishable from a clean stop. The timestamp, pid
+      // and both paths are what turn a bare `code=1` into a diagnosis: Electron
+      // exits 1 with empty stderr precisely when it cannot load the app entry,
+      // so the dated `exists=` line written at spawn is the other half.
+      const entryExists = existsSync(this.hostMainPath)
+      const line = `${hostStamp()} browser host exited (code=${String(code)} signal=${String(signal)})`
+        + ` pid=${String(this.child?.pid)} electron=${electron} hostMain=${this.hostMainPath}`
+        + ` entryExists=${String(entryExists)}`
+        // Comparing this with the `exists=` recorded at spawn is the whole
+        // diagnosis: present at spawn and absent now means the installation was
+        // replaced underneath a running host, which is exactly how Electron ends
+        // up unable to load the app entry and exits 1 with empty stderr.
+        + (entryExists ? '' : ' [entry script missing at exit]')
       appendHostLog(`${line}\n`)
       this.fail(new Error(`dsh-builtin-browser: ${line}`))
     })
@@ -566,7 +593,7 @@ class ElectronChildClient {
       const line = this.buffer.slice(0, nl).trim()
       this.buffer = this.buffer.slice(nl + 1)
       if (line === '') continue
-      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string; action?: unknown }
+      let msg: { id?: number; op?: string; token?: string; ok?: boolean; result?: unknown; err?: string; action?: unknown; windowId?: unknown }
       try {
         msg = JSON.parse(line) as typeof msg
       } catch {
@@ -578,6 +605,14 @@ class ElectronChildClient {
         // there is no reply and no pending id — route it straight to the
         // host's user-action handler (which the provider registered).
         this.onUserAction?.(msg.action as BrowserUserAction)
+        continue
+      }
+      if (msg.op === 'viewClosed') {
+        // Fire-and-forget notification from the child's own UI: the human closed
+        // the window, so the interface that session showed is gone. The provider
+        // decides what that ends — browsing history and login state survive on
+        // disk, only the session itself does not.
+        this.onViewClosed?.(typeof msg.windowId === 'string' ? msg.windowId : '')
         continue
       }
       if (this.awaitingHello) {
@@ -717,6 +752,12 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
   private readonly groups = new Map<string, { windowId: string; label?: string }>()
   /** The provider's user-action handler; routes toolbar actions into sessions. */
   private userActionHandler: ((action: BrowserUserAction) => void) | undefined
+  /**
+   * The provider's handler for a window the human closed. Closing the interface
+   * ends the session it showed: history and login state stay on disk, so the
+   * next open starts clean instead of resuming a window nobody can see.
+   */
+  private viewClosedHandler: ((windowId: string) => void) | undefined
 
   constructor(
     private readonly hostMainPath: string,
@@ -826,6 +867,7 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
       token,
       () => this.onChildExit(),
       action => this.userActionHandler?.(action),
+      windowId => this.viewClosedHandler?.(windowId),
       this.spawnExecutable,
     )
     if (this.pendingSocket !== undefined) {
@@ -959,6 +1001,11 @@ export class RemoteElectronViewHost implements ElectronBrowserViewHost {
     this.userActionHandler = handler
   }
 
+  /** Register the provider's handler for windows the human closed. */
+  onViewClosed(handler: (windowId: string) => void): void {
+    this.viewClosedHandler = handler
+  }
+
   /** Surface a failed user action to the child's toolbar (address bar etc.). */
   notifyUserActionError(windowId: string, message: string): void {
     void this.ready()
@@ -1080,6 +1127,16 @@ class DeferredRemoteView implements ElectronViewHandle {
  */
 const HOST_LOG_MAX_BYTES = 2 * 1024 * 1024
 
+/**
+ * ISO timestamp prefix for host-log lines. This log is the only place a spawn
+ * failure is recorded, and an undated line cannot be lined up with anything else
+ * that happened on the machine — a plugin update replacing the entry script, for
+ * instance — which is precisely the question this log gets asked.
+ */
+function hostStamp(): string {
+  return new Date().toISOString()
+}
+
 function appendHostLog(text: string): void {
   const home = process.env.DSH_HOME
   if (home === undefined || home === '') return
@@ -1087,7 +1144,12 @@ function appendHostLog(text: string): void {
     const dir = join(home, 'logs')
     const file = join(dir, 'dsh-builtin-browser-host.log')
     try {
-      if (statSync(file).size > HOST_LOG_MAX_BYTES) writeFileSync(file, '')
+      if (statSync(file).size > HOST_LOG_MAX_BYTES) {
+        // Discard the old bytes but leave a dated marker: truncating to empty
+        // makes a rotation look like "nothing ever happened", which is how the
+        // history of a crash loop gets silently swallowed.
+        writeFileSync(file, `${hostStamp()} log rotated: previous content exceeded ${String(HOST_LOG_MAX_BYTES)} bytes and was discarded\n`)
+      }
     } catch { /* first write, or unreadable: just append */ }
     mkdirSync(dir, { recursive: true })
     appendFileSync(file, text)

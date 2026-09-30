@@ -389,7 +389,32 @@ function windowFor(windowId: string | undefined): HostWindow {
   const existing = windows.get(key)
   if (existing !== undefined) return existing
   const w = new BrowserWindow({ width: 1400, height: 900, show: true, title: 'dsh-browser' })
-  w.on('closed', () => { windows.delete(key) })
+  w.on('closed', () => {
+    const closing = windows.get(key)
+    windows.delete(key)
+    // A BrowserWindow does not destroy its child views: their webContents (the
+    // renderer process, its timers and audio) outlive the window unless closed
+    // explicitly, so release them here instead of leaking a renderer per window.
+    if (closing !== undefined) {
+      for (const view of closing.views.values()) {
+        try {
+          view.webContentsView.webContents.close()
+        } catch {
+          // Already destroyed along with the window.
+        }
+      }
+      closing.views.clear()
+    }
+    // The interface is gone for good. Report it, so the plugin ends that session
+    // instead of holding one whose window the human already closed. Browsing
+    // history and login state live on disk, so the next open starts a clean
+    // session rather than resurrecting this one.
+    try {
+      rpcSocket?.write(JSON.stringify({ id: 0, op: 'viewClosed', windowId: key }) + '\n')
+    } catch {
+      // Socket already gone (parent shutting down): nothing left to report to.
+    }
+  })
   const win: HostWindow = { windowId: key, window: w, toolbarView: undefined, views: new Map(), visibleViewId: undefined, lastFocusedViewId: undefined, closeTimer: undefined }
   // Keep every view (and the toolbar) filling the window as the human
   // resizes it; otherwise pages stay at their original size and break.

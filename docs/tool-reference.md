@@ -1,6 +1,6 @@
 # 工具参考
 
-全部 33 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;只读工具永不拦截。
+全部 34 个 `browser_*` 工具。守卫列:✅ 表示该动作受 `browser_restrict` 白名单约束;只读工具永不拦截。
 
 ## 页面与导航
 
@@ -49,6 +49,7 @@
 | 工具 | 参数 | 输出 | 守卫 | 说明 |
 | --- | --- | --- | --- | --- |
 | `browser_history` | – | `{ entries[] }` | – | 操作日志(最新在后),含 seq/action/ok/params/result/error |
+| `browser_visited` | `limit`(默认 30,上限 200), `domain`(主机名包含匹配) | `{ count, entries[] }` | – | **持久化浏览历史**(访问过的页面,最新在前):与 cookie 同址落盘(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),关闭浏览器与重启 DSH 后仍在;上限 5000 条或 90 天。重开某条用 `browser_open`;与 `browser_history`(会话内操作日志,随会话消失)是两件事;可在设置里关闭记录 |
 | `browser_replay` | `seq`(必填) | `{ replayed }` | ✅ | 按序号回放某一步(navigate/execute/click/type/scroll/key) |
 | `browser_download` | `url`(必填), `savePath`(必填) | `{ path }` | ✅ | 带会话 cookie 下载到本地(仅 http(s);`savePath` 必须为绝对路径且位于 `downloadDir` 内——默认系统下载目录,自动识别 `Downloads`/`下载`/`下載` 与 `XDG_DOWNLOAD_DIR`;不覆盖已有文件;上限 256MB,受 CORS 约束;由子进程直接落盘) |
 

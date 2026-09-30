@@ -105,7 +105,12 @@ function taskKey(exec: { agent?: { id?: string } } | undefined): string {
  */
 async function ensureSession(browser: NonNullable<Context['browser']>, state: ToolBrowserState, key: string, agent?: ExecAgent): Promise<BrowserSessionId> {
   const existing = state.sessionsByTask.get(key)
-  if (existing !== undefined) return existing
+  if (existing !== undefined) {
+    // The human closing a browser window ends that session, so a cached id can
+    // be stale: never hand a dead session back to a tool call.
+    if (browser.exists(existing)) return existing
+    state.sessionsByTask.delete(key)
+  }
   const pending = state.pendingOpens.get(key)
   if (pending !== undefined) return pending
   // The task key rides along as the session label so the window title shows
@@ -1324,6 +1329,71 @@ export function apply(ctx: Context, config: Config = {}): void {
         return row
       })
       return { entries: rendered as never }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'browser_visited',
+    description: 'List pages the shared browser has visited, newest first, from the PERSISTENT browsing history: it survives closing the browser and restarting DSH, so it is how you (or the human) find a page again afterwards. Reopen one by passing its url to browser_open. Not to be confused with browser_history, which is only the current session\'s operation log (navigate/click/type) and disappears with the session.',
+    parameters: {
+      limit: { type: 'number', description: 'Maximum entries to return (default 30, capped at 200).' },
+      domain: { type: 'string', description: 'Only visits whose hostname contains this text (case-insensitive).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          count: { type: 'number', required: true },
+          entries: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                at: { type: 'number', required: true },
+                url: { type: 'string', required: true },
+                title: { type: 'string' },
+                session: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const entries = value.entries as Array<{ at: number; url: string; title?: string; session?: string }>
+        if (entries.length === 0) {
+          return [{ type: 'text', text: '(no recorded visits — nothing has been browsed yet, or history recording is turned off in settings)' }]
+        }
+        return [{
+          type: 'text',
+          text: entries.map(entry => {
+            const when = new Date(entry.at).toISOString().replace('T', ' ').slice(0, 19)
+            const title = entry.title !== undefined ? `${entry.title} — ` : ''
+            return `${when}  ${title}${entry.url}${entry.session !== undefined ? `  [${entry.session}]` : ''}`
+          }).join('\n'),
+        }]
+      },
+    },
+    timeoutMs,
+    isConcurrencySafe: () => true,
+    async execute(args, _exec) {
+      const browser = ctx.get('browser')
+      if (browser === undefined) throw new Error('tool-browser: browser service unavailable')
+      const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? args.limit : 30
+      const limit = Math.max(1, Math.min(200, Math.floor(rawLimit)))
+      const domain = typeof args.domain === 'string' && args.domain.trim() !== '' ? args.domain.trim() : undefined
+      const entries = browser.visited({ limit, ...domain !== undefined ? { domain } : {} })
+      return {
+        count: entries.length,
+        entries: entries.map(entry => ({
+          at: entry.at,
+          url: entry.url,
+          ...entry.title !== undefined ? { title: entry.title } : {},
+          ...entry.session !== undefined ? { session: entry.session } : {},
+        })),
+      }
     },
   }))
 

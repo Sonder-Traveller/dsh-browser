@@ -13,6 +13,13 @@ import assert from 'node:assert/strict'
  * dynamic import. The third constructor argument is the probe seam.
  */
 process.env.DSH_BROWSER_PROBE_RETRY_MS = '30'
+// Isolate the host log: this file constructs real hosts, which write a spawn line
+// (and an exit line) to `$DSH_HOME/logs/dsh-builtin-browser-host.log` — the log an
+// operator reads to diagnose a crash loop. Writing synthetic entries there would
+// make its history unreadable. Module scope, set before the dynamic import below.
+process.env.DSH_HOME = (await import('node:fs')).mkdtempSync(
+  (await import('node:path')).join((await import('node:os')).tmpdir(), 'dsh-probe-'),
+)
 const { RemoteElectronViewHost } = await import('../lib/browser-electron/remote-host.js')
 
 const settle = (ms) => new Promise(resolve => setTimeout(resolve, ms))

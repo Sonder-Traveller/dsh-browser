@@ -47,6 +47,7 @@ import type {
   BrowserKeyRequest,
   BrowserChallenge,
   ExportedCookie,
+  VisitedPage,
 } from './types.js'
 import { BrowserError } from './types.js'
 
@@ -343,6 +344,27 @@ export class BrowserRuntime extends Service {
   /** Return the session's chronological operation log through the provider. */
   async history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]> {
     return this.resolveProvider().history(session)
+  }
+
+  /**
+   * Persisted visits, newest first — the record that outlives the browser
+   * process, as opposed to {@link history}'s session-scoped operation log.
+   * @param options - result cap and an optional hostname filter.
+   * @returns the retained visits (empty when history recording is disabled).
+   */
+  visited(options?: { readonly limit?: number; readonly domain?: string }): readonly VisitedPage[] {
+    return this.resolveProvider().visited(options)
+  }
+
+  /**
+   * Whether a session is still live. Sessions can end outside the tool layer
+   * (the human closed its window), so a cached id must be re-checked before
+   * reuse; a provider that does not implement the check counts as live.
+   * @param session - the session id to test.
+   */
+  exists(session: BrowserSessionId): boolean {
+    const provider = this.resolveProvider()
+    return provider.exists === undefined ? true : provider.exists(session)
   }
 
   /** Replay one recorded operation by sequence number through the provider. */

@@ -18,7 +18,7 @@
 | --- | --- |
 | 了解插件为什么存在、与无头方案的区别 | [为什么做共享真实浏览器](docs/why-browser.md) |
 | 安装、配置与日常使用 | [用户指南](docs/user-guide.md) |
-| 全部 33 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
+| 全部 34 个工具的参数、输出与示例 | [工具参考](docs/tool-reference.md) |
 | 了解 seam / provider / 工具三层与自托管实现 | [架构说明](docs/architecture.md) |
 | 查看全部文档与 README 分工 | [文档索引](docs/README.md) |
 
@@ -28,7 +28,7 @@
 
 - **真实视图,而非转播**:浏览器是原生 `WebContentsView`,用户直接看到 agent 在做什么,随时可以上手接管;
 - **装好即用**:有桌面外壳时嵌入外壳视图;纯 `dsh web` 也能**自托管**——插件自己拉起一个 Electron 窗口,不需要任何额外配置;
-- **一插件即一套工具**:安装后 agent 自动获得 33 个 `browser_*` 工具(打开、查看、无障碍树、等待、语义/坐标操作、滚动、回退、批量/单控件填表、按键、结构化提取、截图、下载、登录态管理……)。
+- **一插件即一套工具**:安装后 agent 自动获得 34 个 `browser_*` 工具(打开、查看、无障碍树、等待、语义/坐标操作、滚动、回退、批量/单控件填表、按键、结构化提取、截图、下载、登录态管理……)。
 
 一句话:**安装插件 = 获得一个与用户共享、可被 agent 驱动的真实浏览器。**
 
@@ -117,6 +117,26 @@ dsh plugin --profile web add <本仓库路径>
       <p><code>browser_screenshot</code> 支持 <code>savePath</code> 直接落盘 PNG,交给视觉模型(modlens 等)做基于视觉的元素定位。</p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>可查的浏览历史</h3>
+      <p><code>browser_visited</code> 读取<b>持久化</b>的访问记录(与 cookie 同址落盘,关闭浏览器、重启 DSH 后仍在),可按域名过滤并重新打开任意一条。它与 <code>browser_history</code>(会话内的操作日志)是两件事。</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>可视化鼠标</h3>
+      <p>agent 操作时在页面内绘制虚拟光标与点击涟漪 —— <b>光标出现即表示它已接管该标签页</b>;DOM 级操作(填值/勾选/选择)同样有落点。可在设置里关闭。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>设置页里的「浏览器」栏</h3>
+      <p>历史与 cookie 是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 开关<b>即时生效</b>,无需重启。</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>收尾明确</h3>
+      <p><b>关掉浏览器窗口 = 结束该会话</b>(下次打开是干净的新会话),浏览历史与登录状态保留;<b>收起界面只是收起</b>,浏览器继续在后台运行。</p>
+    </td>
+  </tr>
 </table>
 
 ## 为什么选它
@@ -135,6 +155,7 @@ dsh plugin --profile web add <本仓库路径>
 | `browser_snapshot` | 交互元素(输入框/按钮/链接)带编号清单(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_a11y` | 无障碍树:每个交互节点的语义角色/名称/值/状态 + 坐标(穿透同源 iframe 与 Shadow DOM) | – |
 | `browser_execute` | 在页面执行 JS;参数以 `arguments[0..n]` 传入 | ✅ |
+| `browser_visited` | 读取持久化浏览历史(访问过的页面,可按域名过滤/限量);重开用 `browser_open` | – |
 | `browser_content` | 以 html / markdown / txt / json 抓取页面(selector、maxChars、timeoutMs) | – |
 | `browser_click` | 点击:语义目标(`target`: css/text/xpath,滚动到元素并点中心)或视口坐标(配合截图视觉定位) | ✅ |
 | `browser_type` | 输入文本(可先按 `target` 聚焦元素;CDP `Input.insertText`) | ✅ |
@@ -211,7 +232,7 @@ agent (browser_* 工具)
 
 - **seam 层**(`browser` 行)提供 `ctx.browser` 服务:provider 注册、会话生命周期、错误码,与具体实现解耦;
 - **provider 层**(`browser-electron` 行)通过 `ElectronBrowserViewHost` 接缝操作视图(创建/销毁/显示/`sendCommand`),由真实外壳用 Electron 对象实现;
-- **工具层**(`tool-browser` 行)提供模型侧的 33 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
+- **工具层**(`tool-browser` 行)提供模型侧的 34 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
 
 **自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动。RPC 带随机 token 认证,token 经 **stdin + 环境变量双通道**传递——Windows 上 Electron 是 GUI 子系统进程、收不到 piped stdin,环境变量兜底保证握手稳定。子进程崩溃会自动重启;优先使用随插件安装的 electron 包(**打包应用如 DSH Desktop.exe 不会被误当作可复用二进制**,避免 spawn 秒退);截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起);Electron 的定位顺序见下(33.x 有合成器缺陷,建议 ≥ 40;44+ 的 electron 包不再随安装自动下载二进制,首次使用若缺失会按报错提示先 `npx install-electron`,需联网)。
 
@@ -242,6 +263,25 @@ agent (browser_* 工具)
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
+
+## 更新方式(两端不同)
+
+插件在两种宿主里各有一份安装,更新路径也不同 —— **更新其中一端不会连带更新另一端**。
+
+**桌面端(DSH Desktop)**
+- 插件是桌面端 profile 里的依赖(profile 目录通常是 `$DSH_HOME/profiles/desktop`)。更新它 = 把该 profile 里的依赖更新到新版本,然后**重启 DSH Desktop**,客户端设置栏与工具才会换成新代码。
+- 浏览器内核由桌面端自带的 Electron 提供,插件不会再下载一份 Electron。
+- 桌面端自身的升级不会自动带来插件升级,需要按上面的方式单独更新。
+
+**Web 端(`dsh web`)**
+- 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
+- Web 端没有桌面外壳,共享浏览器由插件自托管拉起:首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
+- 更新方式与你首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录)。
+
+**两端一致的体验**
+- 工具集(34 个 `browser_*`)、设置页里的「浏览器」栏、浏览历史与 cookie 的持久化行为完全相同;差别只在浏览器窗口由谁承载(桌面外壳 / 插件自托管)。
+- 升级不会丢数据:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),登录状态在同一 profile 目录里。
+- 升级后如果历史记录不符合预期,先去「设置 → 浏览器」确认这些开关:历史默认**开**、侧栏自动展开默认**开**、会话结束时自动关闭浏览器默认**关**。
 
 ## 已知限制
 
@@ -314,6 +354,9 @@ npm run build
 
 | 第十九轮 | 2026-10-01 | **DSH 0.2 兼容性**:DSH 进入 0.2 线(`@deepseek-ai/dsh@0.2.0-rc.2`,peer 包 `dsh-llm`/`dsh-tools`/`dsh-system-prompt` 同步到 `0.2.0-rc.2`),而原声明 `>=0.1.1-rc.1 <0.2.0` 把 0.2 挡在门外 → 在**真实 0.2.0-rc.2 宿主**上实测插件的运行时依赖面(`cordis` 的 Context/Service、`dsh-tools` 的 defineTool、`dsh-llm` 的 HarnessError、`schemastery`),确认无破坏性变更:会话、导航、快照、截图三态(越界拒绝/合法写入/覆盖拒绝)全部通过 → `peerDependencies` 三个 dsh 包范围改为 `>=0.1.1-rc.2 <0.3.0`,`dsh.compatibility.dsh` 放宽为 `>=0.1.1-rc.1 <0.3.0`,`dshReleases` 增加 `0.2.0-rc.1`/`0.2.0-rc.2` = compatible |
 | **0.1.23** | 2026-10-01 | **发布**:第十八轮(PR #15:Windows 合成输入三连 + Electron 探测自愈 + 定位判词)与第十九轮(DSH 0.2 兼容)随 **0.1.23** 发布(构建零错误、**47 项测试全绿**,tag `v0.1.23`) |
+| 第二十轮 | 2026-10-01 | **浏览历史 / 设置栏 / 可视化鼠标 / 收尾语义**:①新增**持久化浏览历史**(`history-store`:追加式 JSONL,落在 cookie 同一 profile 目录;5000 条或 90 天先到者为准;损坏行只丢该行)+ 新工具 **`browser_visited`**(工具数 **33 → 34**),重新打开沿用 `browser_open`;②新增设置页「浏览器」栏(手写客户端 bundle 注册到 `settings.section`,`order: 60` 排在宿主自带栏目下方)+ `GET/PUT /dsh-builtin-browser/settings`(同源防护、64 KiB 上限)+ 设置文档(`settings-store`:字段逐个校验、未知键丢弃、损坏文件按默认值),**开关即时生效**(provider 每次读取,无需重启);③新增页面内**虚拟光标**(内联样式 + Web Animations 以规避页面 `style-src` CSP;`buildTargetScript` 统一附加元素中心 `__point`,于是 click / type / setValue / check / select / clear **都有落点**),**光标出现即代表 agent 已接管该标签页**;④**关掉窗口 = 结束该会话**:窗口 `closed` 时释放其全部视图的 `webContents`(BrowserWindow 不连带销毁子视图,否则每个窗口泄漏一个渲染进程)并上报 `viewClosed`,provider 结束对应会话,seam 新增 `exists()` 供工具层核验会话缓存 —— 下一次调用得到**干净的新会话**,浏览历史与登录状态保留;新增 21 条测试(**68/68 全绿**) |
+| 第二十轮补记 | 2026-10-01 | **客户端设置栏"隐形"的根因 + 崩溃诊断**:①真机验证发现设置栏不出现 —— 根因是 `cordis.patch.yml` 三行全用**子路径名**(`dsh-builtin-browser/browser`)注册,而宿主的客户端模块扫描只接受**精确包名**(`exactPackageSpecifier` 遇 `/` 即返回 `undefined`),于是这个包在客户端侧没有任何行可供读取 `dsh.client`;修复 = 增加一行以**包名**注册的惰性根行 + 给根入口补 `export const name` 与空 `apply()`;实测启动图条目 67 → **68**、设置栏出现并排在「规则设定」下方、开关即时落盘。②宿主日志三处缺陷修复:加 **ISO 时间戳**、spawn 前记录 **两条路径与存在性**、2 MiB 轮转改为**留时间戳标记**(原先整体清空,几周历史就是这样消失的);`exit` 行加 `pid=`/`entryExists=`,使"启动时存在、退出时不存在"自动命名"安装被就地替换"。③修复**测试污染真实日志**:三个 spawn 类测试因 `dispose()` 异步杀子进程,exit 行写在 `finally` 恢复 `DSH_HOME` 之后 → 改为模块级隔离。测试 **70/70** |
+| **0.2.0** | 2026-10-01 | **发布**:第二十轮(浏览历史持久化 / 设置页「浏览器」栏 / 可视化鼠标 / 收尾语义)及其补记随 **0.2.0** 发布 —— 工具数 **33 → 34**(新增 `browser_visited`),设置页新增「浏览器」栏。构建零错误、**70/70 测试全绿**,tag `v0.2.0` |
 
 > registry 上的最新版本以顶部 npm 徽章为准:本次 `0.1.23` 已入库并打 tag;若徽章仍显示 `0.1.22`,说明该版本尚未 publish。
 

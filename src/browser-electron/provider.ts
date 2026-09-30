@@ -11,6 +11,9 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { HistoryStore, type VisitedPage } from './history-store.js'
+import type { BrowserSettings } from './settings-store.js'
+import { paintCursor, type CursorAction } from './virtual-cursor.js'
 import type {
   BrowserA11yRequest,
   BrowserA11yResult,
@@ -175,6 +178,13 @@ export interface ElectronBrowserViewHost {
    * @param handler - called for every user action; must not throw.
    */
   onUserAction?(handler: (action: BrowserUserAction) => void): void
+  /**
+   * Optional: receive notice that the human closed a browser window. Closing the
+   * interface ends the session it showed — the next call opens a clean one —
+   * while browsing history and login state survive on disk.
+   * @param handler - called with the group (session) key; must not throw.
+   */
+  onViewClosed?(handler: (windowId: string) => void): void
 }
 
 /**
@@ -238,6 +248,28 @@ interface Session {
 export interface ElectronBrowserProviderConfig {
   /** Allow navigation only to HTTP(S) URLs; reject anything else. Default true. */
   readonly httpOnly?: boolean
+  /**
+   * Persistent browsing history (visited pages), independent of session
+   * lifetime. `enabled: false` keeps the browser working but records nothing;
+   * the retained limits ride along so a user's choice from the settings panel
+   * reaches the store without a second configuration path.
+   */
+  readonly history?: {
+    readonly enabled?: boolean
+    readonly maxEntries?: number
+    readonly maxAgeDays?: number
+    /**
+     * Explicit history file path. Default: beside the browser profile
+     * (`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`).
+     */
+    readonly file?: string
+  }
+  /**
+   * Live settings source (the settings panel's document). When present it wins
+   * over the static `history` config, so a switch flipped in the UI takes effect
+   * without restarting DSH.
+   */
+  readonly settings?: () => BrowserSettings
   /** Maximum snapshot elements before truncation. Default 60. */
   readonly snapshotMaxElements?: number
   /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
@@ -365,6 +397,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
   private readonly snapshotMaxElements: number
   private readonly contentMaxChars: number
   private readonly downloadDir: string | undefined
+  /**
+   * Persistent browsing history, or `undefined` when the user turned it off.
+   * Sessions come and go; this record outlives all of them.
+   */
+  private readonly historyStore: HistoryStore | undefined
+  /** Live settings source; absent when nothing owns a settings document. */
+  private readonly settingsSource: (() => BrowserSettings) | undefined
 
   constructor(
     private readonly host: ElectronBrowserViewHost,
@@ -379,9 +418,21 @@ export class ElectronBrowserProvider implements BrowserProvider {
     // sandbox does not have to arbitrate. The localized name is probed so a
     // Chinese desktop (`~/下载`) works without configuring `downloadDir`.
     this.downloadDir = config.downloadDir ?? defaultDownloadDir()
+    this.settingsSource = config.settings
+    // Browsing history follows the browser profile's persistence rules (close
+    // the interface, lose nothing), and can be switched off from settings.
+    this.historyStore = config.history?.enabled === false
+      ? undefined
+      : new HistoryStore(config.history?.file, {
+        ...config.history?.maxEntries !== undefined ? { maxEntries: config.history.maxEntries } : {},
+        ...config.history?.maxAgeDays !== undefined ? { maxAgeDays: config.history.maxAgeDays } : {},
+      })
     // Route toolbar (host UI) actions into the session model: the human and
     // the agent then always drive the same tabs, history, and navigation.
     this.host.onUserAction?.(action => { void this.handleUserAction(action) })
+    // A window the human closed ends the session it showed: the next call opens a
+    // clean one instead of driving a page nobody can see.
+    this.host.onViewClosed?.(windowId => { void this.handleViewClosed(windowId) })
   }
 
   /**
@@ -556,6 +607,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // NEXT observation sees, not whether this action happened).
       this.record(s, 'navigate', { url }, true)
       await this.settleDocument(handle, before, signal)
+      this.recordVisit(s, handle)
       this.showActive(s)
     } catch (error) {
       if (!(error instanceof BrowserError && (error as { code?: string }).code === 'BROWSER_NAVIGATION_BLOCKED')) {
@@ -1244,6 +1296,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     } catch (error) {
       throw new BrowserError(`browser: click failed: ${String(error)}`, 'BROWSER_CLICK_FAILED', { cause: error })
     }
+    // Paint before the press so the ripple is already on screen when the click
+    // lands — the cursor exists to show the human WHERE the agent acts.
+    this.showCursor(handle, x, y, 'click')
     const release = (): void => {
       void handle
         .sendCommand('Input.dispatchMouseEvent', {
@@ -1293,7 +1348,10 @@ export class ElectronBrowserProvider implements BrowserProvider {
         el.focus()
         return { ok: true }
       `)
-      await this.runTargetScript(this.activeTab(s), script, locateMs, signal, 'BROWSER_TYPE_FAILED', 'browser: type')
+      const locateTab = this.activeTab(s)
+      const out = await this.runTargetScript(locateTab, script, locateMs, signal, 'BROWSER_TYPE_FAILED', 'browser: type')
+      const cursorPoint = scriptPoint(out)
+      if (cursorPoint !== undefined) this.showCursor(locateTab.handle, cursorPoint.x, cursorPoint.y, 'click')
     }
     const text = 'text' in request ? request.text : ''
     const timeoutMs = 30_000
@@ -1383,6 +1441,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     )
     this.record(s, direction === -1 ? 'back' : 'forward', {}, true)
     await this.settleDocument(handle, before, signal)
+    this.recordVisit(s, handle)
     this.showActive(s)
   }
 
@@ -1415,6 +1474,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
     )
     this.record(s, 'reload', {}, true)
     await this.settleDocument(handle, before, signal)
+    this.recordVisit(s, handle)
     this.showActive(s)
   }
 
@@ -1664,7 +1724,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
         if (Date.now() >= deadline) return { ok: false, error: 'element not found: ' + JSON.stringify(spec) + ' (looked for ' + timeoutMs + 'ms)' }
         await sleep(100)
       }
+      const __result = await (async () => {
       ${body}
+      })()
+      // Report the operated element's viewport center next to the script's own
+      // verdict: the synthetic cursor (and any future feedback) needs the point,
+      // and no individual body should have to compute it a second time. Kept
+      // under a distinct key so a body that already returns x/y keeps them.
+      const __rect = el.getBoundingClientRect()
+      return {
+        ...(typeof __result === 'object' && __result !== null ? __result : { ok: true }),
+        __point: { x: Math.round(__rect.x + __rect.width / 2), y: Math.round(__rect.y + __rect.height / 2) },
+      }
     })()`
   }
 
@@ -1742,6 +1813,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     `
     const script = this.buildTargetScript(request.target, timeoutMs, body)
     const out = await this.runTargetScript(tab, script, timeoutMs, signal, 'BROWSER_SET_VALUE_FAILED', 'browser: setValue')
+    const cursorPoint = scriptPoint(out)
+    if (cursorPoint !== undefined) this.showCursor(tab.handle, cursorPoint.x, cursorPoint.y, 'click')
     this.record(s, 'setValue', { target: request.target, value: String(request.value) }, true, { result: out.method as string })
     return { method: out.method as string, value: out.value as string }
   }
@@ -1768,6 +1841,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     `
     const script = this.buildTargetScript(request.target, timeoutMs, body)
     const out = await this.runTargetScript(tab, script, timeoutMs, signal, 'BROWSER_CHECK_FAILED', 'browser: check')
+    const cursorPoint = scriptPoint(out)
+    if (cursorPoint !== undefined) this.showCursor(tab.handle, cursorPoint.x, cursorPoint.y, 'click')
     this.record(s, 'check', { target: request.target, checked: want }, true)
     return { checked: out.checked === true }
   }
@@ -1800,6 +1875,8 @@ export class ElectronBrowserProvider implements BrowserProvider {
     `
     const script = this.buildTargetScript(request.target, timeoutMs, body)
     const out = await this.runTargetScript(tab, script, timeoutMs, signal, 'BROWSER_SELECT_FAILED', 'browser: select')
+    const cursorPoint = scriptPoint(out)
+    if (cursorPoint !== undefined) this.showCursor(tab.handle, cursorPoint.x, cursorPoint.y, 'click')
     this.record(s, 'select', { target: request.target, optionValue: request.optionValue ?? null, optionText: request.optionText ?? null, optionIndex: request.optionIndex ?? null }, true)
     return { value: out.value as string, text: out.text as string }
   }
@@ -1833,7 +1910,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
       return { ok: true }
     `
     const script = this.buildTargetScript(request.target, timeoutMs, body)
-    await this.runTargetScript(tab, script, timeoutMs, signal, 'BROWSER_CLEAR_FAILED', 'browser: clear')
+    const out = await this.runTargetScript(tab, script, timeoutMs, signal, 'BROWSER_CLEAR_FAILED', 'browser: clear')
+    const cursorPoint = scriptPoint(out)
+    if (cursorPoint !== undefined) this.showCursor(tab.handle, cursorPoint.x, cursorPoint.y, 'click')
     this.record(s, 'clear', { target: request.target }, true)
     return { cleared: true }
   }
@@ -2161,6 +2240,60 @@ export class ElectronBrowserProvider implements BrowserProvider {
   }
 
   /**
+   * Record one page visit in the persistent browsing history. Fire-and-forget by
+   * design: a visit must never delay or fail the navigation that produced it,
+   * and the title is only worth reading once the document has settled.
+   * @param s - the session that drove the visit.
+   * @param handle - the view whose document just loaded.
+   */
+  private recordVisit(s: Session, handle: ElectronViewHandle): void {
+    const store = this.historyStore
+    if (store === undefined) return
+    // The settings panel can switch recording off at runtime; the static config
+    // only supplies the startup default.
+    if (this.settingsSource !== undefined && !this.settingsSource().history.enabled) return
+    void handleSendEvaluate(handle, 'location.href + "\\u0000" + (document.title || "")')
+      .then(result => {
+        if (!result.ok || typeof result.value !== 'string') return
+        const [url = '', title = ''] = result.value.split('\u0000')
+        // Internal documents are not visits: an untouched browser is not history.
+        if (url === '' || url.startsWith('about:') || url.startsWith('devtools:')) return
+        store.append({
+          at: Date.now(),
+          url,
+          ...title.trim() !== '' ? { title: title.trim() } : {},
+          ...s.label !== undefined ? { session: s.label } : {},
+        })
+        store.prune()
+      })
+      .catch(() => { /* best-effort: history is never worth surfacing an error */ })
+  }
+
+  /**
+   * List persisted visits, newest first — what `browser_visited` reads back.
+   * @param options - result cap and an optional hostname filter.
+   * @returns the matching visits, or an empty list when history is disabled.
+   */
+  visited(options: { readonly limit?: number; readonly domain?: string } = {}): readonly VisitedPage[] {
+    return this.historyStore?.list(options) ?? []
+  }
+
+  /**
+   * Show the synthetic pointer on a view, unless the user switched it off. The
+   * cursor is the "the agent has taken over this tab" signal, so it is painted
+   * for every operation that has a landing point — including DOM-level ones that
+   * move no real pointer.
+   * @param handle - the view to paint into.
+   * @param x - viewport x in CSS pixels.
+   * @param y - viewport y in CSS pixels.
+   * @param action - click pulses a ripple; move only relocates.
+   */
+  private showCursor(handle: ElectronViewHandle, x: number, y: number, action: CursorAction): void {
+    if (this.settingsSource !== undefined && !this.settingsSource().ui.virtualCursor) return
+    paintCursor(handle, x, y, action, (target, expression) => handleSendEvaluate(target, expression))
+  }
+
+  /**
    * Replay one recorded operation by sequence number. Navigate/click/type are
    * re-issued against the current page; execute re-runs its script. The
    * replayed step is appended to history as a new entry.
@@ -2270,6 +2403,29 @@ export class ElectronBrowserProvider implements BrowserProvider {
   /** Find a session's tab by its backing view id (toolbar actions carry view ids). */
   private tabByViewId(s: Session, viewId: string): Tab | undefined {
     return s.tabs.find(tab => tab.handle.id === viewId)
+  }
+
+  /**
+   * Whether a session is still live. The human closing a window ends its session
+   * (see {@link handleViewClosed}), so callers that cache ids must ask first.
+   * @param session - the session id to test.
+   */
+  exists(session: BrowserSessionId): boolean {
+    return this.sessions.has(session)
+  }
+
+  /**
+   * The human closed a browser window: the session that window showed is over.
+   * Ending it here is what makes the next call a clean start rather than a
+   * resurrection of an invisible window. Browsing history and login state live
+   * on disk, so nothing the human cares about is lost with it.
+   * @param windowId - the group key the host reported, which is the session id.
+   */
+  private async handleViewClosed(windowId: string): Promise<void> {
+    if (typeof windowId !== 'string' || windowId === '') return
+    const s = this.sessions.get(windowId as BrowserSessionId)
+    if (s === undefined) return
+    await this.close(s.id).catch(() => { /* the window is already gone */ })
   }
 
   /**
@@ -2477,6 +2633,14 @@ function terminatePage(handle: ElectronViewHandle): void {
  * @param expression - the JS expression.
  * @param signal - optional abort signal; a fired signal rejects the call.
  */
+/** Viewport point a target script reported, when it reported one. */
+function scriptPoint(out: Record<string, unknown> | undefined): { x: number; y: number } | undefined {
+  const point = out?.__point as { x?: unknown; y?: unknown } | undefined
+  const x = Number(point?.x)
+  const y = Number(point?.y)
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined
+}
+
 async function handleSendEvaluate(
   handle: ElectronViewHandle,
   expression: string,

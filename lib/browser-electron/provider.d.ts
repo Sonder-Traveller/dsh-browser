@@ -6,6 +6,8 @@
  * shell that owns the `BrowserWindow`.
  * @module dsh-browser/browser-electron
  */
+import { type VisitedPage } from './history-store.js';
+import type { BrowserSettings } from './settings-store.js';
 import type { BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, ExportedCookie } from '../browser/types.js';
 /** Stable provider id registered with `ctx.browser`. */
 export declare const ELECTRON_BROWSER_PROVIDER_ID = "electron";
@@ -78,6 +80,13 @@ export interface ElectronBrowserViewHost {
      * @param handler - called for every user action; must not throw.
      */
     onUserAction?(handler: (action: BrowserUserAction) => void): void;
+    /**
+     * Optional: receive notice that the human closed a browser window. Closing the
+     * interface ends the session it showed — the next call opens a clean one —
+     * while browsing history and login state survive on disk.
+     * @param handler - called with the group (session) key; must not throw.
+     */
+    onViewClosed?(handler: (windowId: string) => void): void;
 }
 /**
  * A user-initiated browser action from the host's own UI (toolbar). The
@@ -137,6 +146,28 @@ export interface ElectronViewHandle {
 export interface ElectronBrowserProviderConfig {
     /** Allow navigation only to HTTP(S) URLs; reject anything else. Default true. */
     readonly httpOnly?: boolean;
+    /**
+     * Persistent browsing history (visited pages), independent of session
+     * lifetime. `enabled: false` keeps the browser working but records nothing;
+     * the retained limits ride along so a user's choice from the settings panel
+     * reaches the store without a second configuration path.
+     */
+    readonly history?: {
+        readonly enabled?: boolean;
+        readonly maxEntries?: number;
+        readonly maxAgeDays?: number;
+        /**
+         * Explicit history file path. Default: beside the browser profile
+         * (`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`).
+         */
+        readonly file?: string;
+    };
+    /**
+     * Live settings source (the settings panel's document). When present it wins
+     * over the static `history` config, so a switch flipped in the UI takes effect
+     * without restarting DSH.
+     */
+    readonly settings?: () => BrowserSettings;
     /** Maximum snapshot elements before truncation. Default 60. */
     readonly snapshotMaxElements?: number;
     /** Maximum content characters before truncation when no maxChars is given. Default 100_000. */
@@ -208,6 +239,13 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private readonly snapshotMaxElements;
     private readonly contentMaxChars;
     private readonly downloadDir;
+    /**
+     * Persistent browsing history, or `undefined` when the user turned it off.
+     * Sessions come and go; this record outlives all of them.
+     */
+    private readonly historyStore;
+    /** Live settings source; absent when nothing owns a settings document. */
+    private readonly settingsSource;
     constructor(host: ElectronBrowserViewHost, config?: ElectronBrowserProviderConfig);
     /**
      * Usable when the host says it can back views (the self-hosted host probes
@@ -448,6 +486,34 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     /** Return the session's chronological operation log (newest last). */
     history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
     /**
+     * Record one page visit in the persistent browsing history. Fire-and-forget by
+     * design: a visit must never delay or fail the navigation that produced it,
+     * and the title is only worth reading once the document has settled.
+     * @param s - the session that drove the visit.
+     * @param handle - the view whose document just loaded.
+     */
+    private recordVisit;
+    /**
+     * List persisted visits, newest first — what `browser_visited` reads back.
+     * @param options - result cap and an optional hostname filter.
+     * @returns the matching visits, or an empty list when history is disabled.
+     */
+    visited(options?: {
+        readonly limit?: number;
+        readonly domain?: string;
+    }): readonly VisitedPage[];
+    /**
+     * Show the synthetic pointer on a view, unless the user switched it off. The
+     * cursor is the "the agent has taken over this tab" signal, so it is painted
+     * for every operation that has a landing point — including DOM-level ones that
+     * move no real pointer.
+     * @param handle - the view to paint into.
+     * @param x - viewport x in CSS pixels.
+     * @param y - viewport y in CSS pixels.
+     * @param action - click pulses a ripple; move only relocates.
+     */
+    private showCursor;
+    /**
      * Replay one recorded operation by sequence number. Navigate/click/type are
      * re-issued against the current page; execute re-runs its script. The
      * replayed step is appended to history as a new entry.
@@ -465,6 +531,20 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     private newTab;
     /** Find a session's tab by its backing view id (toolbar actions carry view ids). */
     private tabByViewId;
+    /**
+     * Whether a session is still live. The human closing a window ends its session
+     * (see {@link handleViewClosed}), so callers that cache ids must ask first.
+     * @param session - the session id to test.
+     */
+    exists(session: BrowserSessionId): boolean;
+    /**
+     * The human closed a browser window: the session that window showed is over.
+     * Ending it here is what makes the next call a clean start rather than a
+     * resurrection of an invisible window. Browsing history and login state live
+     * on disk, so nothing the human cares about is lost with it.
+     * @param windowId - the group key the host reported, which is the session id.
+     */
+    private handleViewClosed;
     /**
      * Route a user-initiated action from the host's UI into the session model.
      * Fire-and-forget by design: a user action failing (e.g. an unreachable

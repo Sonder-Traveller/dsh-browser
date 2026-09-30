@@ -765,3 +765,77 @@ bump `0.1.22 → 0.1.23`,把**第十八轮**(PR #15:Windows 合成输入三连 �
 README 中英同步:更新记录新增两行;兼容性说明从 `<0.2.0` 更新为覆盖 0.2 线。
 
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **47/47 全部通过**;真实 `dsh web` 0.2.0-rc.2 宿主上跑通会话 / 导航 / 快照 / 截图三态。
+
+---
+
+## 第二十轮(2026-10-01,浏览历史持久化 / 设置栏 / 可视化鼠标 / 收尾语义)
+
+**背景**:使用反馈集中在四件事 —— 浏览器操作后的收尾不符合预期、访问过的页面事后无从追溯、展示方式打扰、以及看不到 agent 究竟在操作哪里。本轮按"不依赖宿主新接口的先做"落地,并为桌面端侧栏集成留出可降级的位置。
+
+**1. 浏览历史持久化(新增 `browser_visited` 工具)**
+
+- 新模块 `src/browser-electron/history-store.ts`:追加式 JSONL,落在浏览器 profile 旁(`$DSH_HOME/dsh-builtin-browser-host/history.jsonl`),与 cookies 同一套持久化规则 —— 关掉界面、重启 DSH 都还在;截断或损坏的行只丢那一行,不会毁掉整份历史。
+- 记录点:`navigate` / 前进 / 后退 / 刷新,在 `settleDocument` 之后读 `location.href` + `document.title` 写入;写入是 fire-and-forget(历史永远不拖慢、也不弄挂一次导航),`about:` / `devtools:` 不计入。保留上限 **5000 条或 90 天**(先到者为准),超限自动裁剪。
+- 工具层新增 **`browser_visited`**(可按域名过滤、限量);重开页面沿用现有 `browser_open`。现有 `browser_history`(会话内操作日志,内存态)语义不变,两者分工写进 README。
+- 配置:`history: { enabled, maxEntries, maxAgeDays, file }`。
+
+**2. 设置栏(客户端插件 + 设置端点)**
+
+- 新增 `client.js`(手写 ModuleLoader bundle)与 `package.json` 的 `dsh.client` 声明(`platform: web`,inject `dsh-client-locale` / `dsh-client-ui-slots` / `dsh-client-ui-settings`),注册到 `settings.section` 插槽并取 `order: 60` —— 排在宿主自带栏目(最靠后 `order: 40`)的**下面**。
+- 服务端:`src/browser-electron/settings-store.ts`(设置文档:字段逐个校验、未知键丢弃、损坏文件按默认值处理、mtime 变化即重读)+ `entry.ts` 中的 `GET/PUT /dsh-builtin-browser/settings`(带**同源防护**与 64 KiB 体积上限)。
+- **开关实时生效**:provider 通过 `settings: () => store.get()` 每次读取,不重启即改变行为(实测:关掉历史后新访问不再记录,既有记录保留)。
+- 开关清单:保留浏览历史 / 保留 cookies / 侧栏自动展开(每轮一次)/ 会话结束时关闭浏览器 / 显示可视化鼠标 / 视觉策略(Auto 或纯非视觉)/ 允许读取凭据;面板同时显示设置文件路径便于排查。
+
+**3. 可视化鼠标(新增 `src/browser-electron/virtual-cursor.ts`)**
+
+- 页面内叠加层(不动系统鼠标):`position: fixed` + 视口坐标 —— 与元素定位的 `getBoundingClientRect`、`Input.dispatchMouseEvent` 处于同一坐标空间。**全部内联样式 + Web Animations**,不使用 `<style>` 元素,否则页面的 `style-src` CSP 会把它拦掉。
+- 落点来源:`buildTargetScript` 统一在脚本返回值上附加元素中心 `__point`,于是 `click`(语义与坐标两种)、`type`、`setValue`、`check`、`select`、`clear` **都有落点** —— DOM 级操作不再"看不见"。已有 x/y 的 click 不受影响(附加键名不覆盖)。
+- 语义:**光标出现即表示 agent 已接管该标签页**;点击带涟漪动画。可由设置 `ui.virtualCursor` 关闭。
+
+**4. 收尾语义(关界面 = 结束该会话)**
+
+- `host-main` 在窗口 `closed` 时:①释放该窗口全部视图的 `webContents`(BrowserWindow 不连带销毁子视图,否则每关一个窗口就泄漏一个渲染进程);②向父进程发送 `viewClosed` 通知(复用既有 `id: 0` 通知通道)。
+- `remote-host` 新增 `onViewClosed(handler)` 注册(与既有 `onUserAction` 同构);provider 收到后**结束对应会话**。`browser` seam 新增 `exists(session)`,工具层的会话缓存先核验再复用 —— 人关掉窗口后,下一次调用开的是一个**干净的新会话**,而不是继续驱动一个谁也看不见的窗口。
+- 浏览历史与登录状态不受影响(它们保存在磁盘上)。
+
+**5. 设置栏一度"隐形"的根因与修复(真机验证后追加)**
+
+- **现象**:安装后浏览器功能全部正常,但设置页里**看不到**「浏览器」栏;`dsh web` 启动日志也没有报任何与插件相关的失败,启动图(`window.__DSH_BOOT__.entries`)里**没有** `dsh-builtin-browser` 条目。
+- **根因**:宿主的客户端模块扫描(`client-modules`)从 **Loader 行的 specifier** 解析包根,再读该包的 `dsh.client` 声明;而它只接受**精确包名**——
+
+  ```ts
+  function exactPackageSpecifier(specifier) {
+    return specifier.length > 0 && !specifier.includes('/') && !specifier.includes(':') ? specifier : undefined
+  }
+  ```
+
+  本插件的 `cordis.patch.yml` 三行全部使用**子路径名**(`dsh-builtin-browser/browser`、`/browser-electron`、`/tool-browser`),含 `/` 即被判为"不是客户端包"并**静默跳过**——于是这个包没有任何一行能让宿主读到它的 `dsh.client`,`ui-slots` / `locale` / `ui-settings` 三个 inject 目标也就无从解析。对照:同环境里能进启动图的第三方插件(purge、vdesktop)都有一行 `name:` 写着**包名本身**。
+- **修复**:①`cordis.patch.yml` 增加一行 `id/name: dsh-builtin-browser`(置于最前,惰性);②`src/index.ts` 补上 `export const name` 与一个空的 `apply()` —— 原先根入口只有 re-export,不足以成为一个合法的 Loader 行。
+- **验证(真实 `dsh web` 0.2.0-rc.2 宿主,带 token 打开 GUI 实测)**:启动图条目 67 → **68**,出现 `{ id: 'dsh-builtin-browser', url: 'plugins/??dsh-builtin-browser/client.js&rev=b0ff3e951670' }`;设置页出现「浏览器」栏并排在「规则设定」下方,**6 个开关**全部渲染(保留浏览历史 / 保留 cookies / 侧栏自动展开 / 会话结束时关闭浏览器 / 显示可视化鼠标 / 允许读取凭据)与视觉策略下拉;拨动开关后 `$DSH_HOME/dsh-builtin-browser-host/settings.json` 立即落盘,`history.jsonl` 同步开始记录。
+- **附带说明**:界面显示的版本号 `0.1.7-rc.2-<hash>-dirty` 来自 `git describe --tags` 的**最近 tag**,而实际代码是 `package.json` 的 **0.2.0-rc.2**(HEAD 为 "release-dsh-0.2.0-rc.2" 合并提交);本地未拉取 0.2 的 tag,与插件无关。
+
+**验证**:`tsc -p tsconfig.json` 零错误;`node --test tests/*.test.mjs` **68/68 全绿**(新增 21 条:历史 7、设置 5、可视化鼠标 5、关窗口 4)。
+
+**边界与状态**:桌面端"官方侧栏承载 agent 浏览器(人机同页)"需要宿主提供 guest 控制权接口,本轮**未做** —— 接口缺席时插件按现状(自托管弹窗)工作,以上功能均不受影响。
+
+---
+
+## 第二十轮补记(2026-10-01,真机复现后追加)
+
+**6. 宿主日志与崩溃诊断**
+
+- 真机复现(隔离 `DSH_HOME`、带真 TCP 监听的 `repro2.mjs`,7 个用例)把一类崩溃锁到唯一签名:**`code=1` + 零 stderr**,只对应"Electron 加载不了 app 入口脚本";同时否证了"抢 GPU cache/session 锁""信息被吞进没人读的 stdout""父进程未监听"三条假设。
+- 由此暴露日志本身的三处缺陷,已修:①**无时间戳** → `hostStamp()` 给每行加 ISO 前缀;②**入口与二进制路径没被记录** → spawn 前写 `spawning: electron=<path> (exists=…) hostMain=<path> (exists=…) port=…`;③**2 MiB 轮转整体清空** → 改为写入带时间戳的轮转标记(就是它把几周历史销毁的)。`exit` 行另加 `pid=` 与 `entryExists=`(退出时复查入口),于是"启动时存在、退出时不存在"这一组合**自己就能命名**"安装被就地替换"这一根因。
+- **测试污染修复**:`host-log` / `remote-host-recovery` / `electron-probe` 三个测试会真实 spawn 子进程,而 `dispose()` 是**异步**杀子进程的 —— 它的 exit 行写在测试 `finally` 恢复 `DSH_HOME` **之后**,于是合成记录进了操作者真实的 `$DSH_HOME/logs/dsh-builtin-browser-host.log`(正是崩溃诊断所依赖的那份)。三处改为**模块级**隔离且不再恢复,并以"跑测试前后真实日志行数不变"验证。
+
+**验证**:`tsc` 零错误;`node --test tests/*.test.mjs` **70/70 全绿**(新增 host-log 2 条)。
+
+---
+
+## 0.2.0 发布(2026-10-01)
+
+bump `0.1.23 → 0.2.0`,发布**第二十轮**(浏览历史持久化 / 设置页「浏览器」栏 / 可视化鼠标 / 收尾语义)及其真机补记(客户端设置栏"隐形"的根因修复、宿主日志与崩溃诊断)。这是插件的第一个**行为可见面**发生变化的版本:工具数 **33 → 34**(新增 `browser_visited`),设置页多出一栏。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **70/70 全部通过**;真实 `dsh web` 0.2.0-rc.2 宿主上带 token 打开 GUI 实测 —— 启动图条目 67 → 68、设置栏出现并排在「规则设定」下方、6 个开关与视觉策略渲染正常、拨动开关即时落盘、`history.jsonl` 同步开始记录。
+
+**顺手记录**:`git describe` 显示 `0.1.7-rc.2-…` 只是本地 tag 未含 0.2 线;`git fetch --tags` 后为 `dsh-v0.2.0-rc.2`。

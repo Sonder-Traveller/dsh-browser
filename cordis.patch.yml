@@ -1,10 +1,29 @@
 # dsh-builtin-browser bundle patch: mounts the shared-browser capability into a
-# profile composition. The browser seam (ctx.browser) is always mounted. The
-# Electron provider and browser_* tools are ALWAYS registered: when the host
-# provides `electronViewHost` (the desktop shell) that embedded view is used,
-# and otherwise the plugin self-hosts its own Electron window, so installing
-# the plugin is enough for the browser to work anywhere.
+# profile composition.
+#
+# Row names matter beyond loading: the host's client-module scan resolves a row's
+# specifier to a PACKAGE ROOT and reads `dsh.client` from there. A row named after
+# a subpath (`dsh-builtin-browser/browser`) is not a package specifier and is
+# skipped by design, which would leave the settings panel permanently absent even
+# though every tool works — hence the inert root row under the bare package name.
+#
+# The browser seam (ctx.browser) is always mounted, and the Electron provider plus
+# the browser_* tools are always registered: when a host provides an embedded view
+# seam the provider drives that view, and otherwise it self-hosts its own Electron
+# window, so installing the plugin is enough for the browser to work anywhere.
+# DSH 0.2 no longer provides `electronViewHost` (the desktop shell's embedded
+# view), so `ctx.get('electronViewHost')` currently resolves to undefined and
+# every surface self-hosts. The row keeps reading it on purpose: a host that
+# reintroduces such a seam is then picked up without a code change.
 - insert:
+    # Root row. The host's client-module scan resolves a loader row's specifier
+    # to a PACKAGE ROOT; a row named after a subpath is skipped, and this package
+    # would then have no row to read its `dsh.client` declaration from — the
+    # browser would work while its settings panel never appeared. This row is
+    # inert (see src/index.ts) and exists only to name the package.
+    - id: dsh-builtin-browser
+      name: dsh-builtin-browser
+
     - id: browser
       name: dsh-builtin-browser/browser
 

@@ -118,6 +118,12 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     private readonly groups;
     /** The provider's user-action handler; routes toolbar actions into sessions. */
     private userActionHandler;
+    /**
+     * The provider's handler for a window the human closed. Closing the interface
+     * ends the session it showed: history and login state stay on disk, so the
+     * next open starts clean instead of resuming a window nobody can see.
+     */
+    private viewClosedHandler;
     constructor(hostMainPath: string, 
     /** Test seam: the executable to spawn instead of the resolved Electron
      *  binary. Absent -> resolveElectronPath() (production behavior). */
@@ -167,6 +173,8 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
     groupView(handle: ElectronViewHandle, windowId: string, label?: string): void;
     /** Register the provider's handler for user-initiated toolbar actions. */
     onUserAction(handler: (action: BrowserUserAction) => void): void;
+    /** Register the provider's handler for windows the human closed. */
+    onViewClosed(handler: (windowId: string) => void): void;
     /** Surface a failed user action to the child's toolbar (address bar etc.). */
     notifyUserActionError(windowId: string, message: string): void;
     destroyView(handle: ElectronViewHandle): void;

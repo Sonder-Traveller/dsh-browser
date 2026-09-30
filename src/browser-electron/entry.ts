@@ -11,11 +11,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
 import type { ElectronBrowserViewHost } from './provider.js'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
+import { SettingsStore } from './settings-store.js'
 
 export {
   ELECTRON_BROWSER_PROVIDER_ID,
@@ -62,6 +64,9 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
   // External host (desktop shell) wins; otherwise self-host. The self-hosted
   // child is disposed with the fiber, mirroring the shell's lifetime.
   const host: ElectronBrowserViewHost = config.viewHost ?? new RemoteElectronViewHost(defaultHostMainPath())
+  // One settings document per plugin instance: the settings panel writes it, the
+  // provider reads it live, and both ends agree on the same file.
+  const settings = new SettingsStore()
   // Own the disposer on THIS plugin's fiber: registerBrowserProvider's effect
   // is bound to the seam's own fiber (the browser row), so a reload of this
   // row would otherwise collide with the still-registered provider
@@ -71,11 +76,141 @@ export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config
     downloadDir: config.downloadDir,
     snapshotMaxElements: config.snapshotMaxElements,
     contentMaxChars: config.contentMaxChars,
+    settings: () => settings.get(),
   }))
   ctx.effect(() => () => {
     unregister()
     if (config.viewHost === undefined && host instanceof RemoteElectronViewHost) {
       host.dispose()
     }
+  })
+  installSettingsRoute(ctx, settings)
+}
+
+/** Route the settings panel reads and writes. */
+const SETTINGS_ROUTE = '/dsh-builtin-browser/settings'
+
+/** The host web-server surface this plugin uses, described structurally. */
+interface WebServerHost {
+  readonly webServer: {
+    register(
+      spec: {
+        readonly kind: 'exact'
+        readonly path: string
+        readonly handler: (request: IncomingMessage, response: ServerResponse) => void | Promise<void>
+      },
+      label?: string,
+    ): () => void
+  }
+  effect(callback: () => (() => void) | void): void
+}
+
+/**
+ * Expose the settings document over the host's web server, which is how the
+ * settings panel reads and writes it. A host without that service (headless /
+ * CLI surfaces) simply skips this: the panel is then unreachable and the file
+ * stays hand-editable — never a plugin-startup failure.
+ * @param ctx - the plugin context.
+ * @param settings - the settings document to expose.
+ */
+function installSettingsRoute(ctx: Context, settings: SettingsStore): void {
+  const inject = (ctx as unknown as {
+    inject?: (deps: readonly string[], callback: (host: WebServerHost) => void) => void
+  }).inject
+  if (typeof inject !== 'function') return
+  try {
+    inject(['webServer'], (host) => {
+      host.effect(() => host.webServer.register({
+        kind: 'exact',
+        path: SETTINGS_ROUTE,
+        handler: (request, response) => handleSettingsRequest(request, response, settings),
+      }, 'dsh-builtin-browser: settings'))
+    })
+  } catch {
+    // No web server on this surface: the settings file remains the interface.
+  }
+}
+
+/**
+ * Same-origin guard. Settings are machine-local configuration, so a page loaded
+ * elsewhere must not be able to read or rewrite them.
+ * @param request - the incoming request.
+ * @returns whether the request may touch the settings document.
+ */
+function sameOrigin(request: IncomingMessage): boolean {
+  const site = String(request.headers['sec-fetch-site'] ?? '').toLowerCase()
+  if (site === 'cross-site') return false
+  const origin = String(request.headers.origin ?? '').trim()
+  if (origin === 'null') return false
+  if (origin === '') return true
+  try {
+    return new URL(origin).host.toLowerCase() === String(request.headers.host ?? '').trim().toLowerCase()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * One settings round-trip: `GET` reads the document, `PUT`/`POST` merges a
+ * partial patch into it.
+ * @param request - the incoming request.
+ * @param response - the response to write.
+ * @param settings - the settings document.
+ */
+async function handleSettingsRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  settings: SettingsStore,
+): Promise<void> {
+  const json = (status: number, body: unknown): void => {
+    response.writeHead(status, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    response.end(JSON.stringify(body))
+  }
+  if (!sameOrigin(request)) {
+    json(403, { ok: false, error: 'cross-origin request refused' })
+    return
+  }
+  const method = request.method ?? 'GET'
+  if (method === 'GET') {
+    json(200, { ok: true, settings: settings.get(), path: settings.path() })
+    return
+  }
+  if (method !== 'PUT' && method !== 'POST') {
+    response.writeHead(405, { allow: 'GET, PUT' })
+    response.end()
+    return
+  }
+  try {
+    const body = await readBody(request)
+    const patch: unknown = body.trim() === '' ? {} : JSON.parse(body)
+    json(200, { ok: true, settings: settings.update(patch) })
+  } catch (error) {
+    json(400, { ok: false, error: `invalid settings patch: ${String(error)}` })
+  }
+}
+
+/**
+ * Read a request body with a hard cap (the settings patch is tiny, and an
+ * unbounded read would let any same-origin caller exhaust memory).
+ * @param request - the incoming request.
+ * @param limit - maximum accepted characters.
+ * @returns the body text.
+ */
+function readBody(request: IncomingMessage, limit = 64 * 1024): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let text = ''
+    request.setEncoding('utf8')
+    request.on('data', chunk => {
+      text += String(chunk)
+      if (text.length > limit) {
+        request.destroy()
+        reject(new Error('settings patch too large'))
+      }
+    })
+    request.on('end', () => resolve(text))
+    request.on('error', reject)
   })
 }

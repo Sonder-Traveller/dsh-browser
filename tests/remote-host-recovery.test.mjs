@@ -1,8 +1,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { RemoteElectronViewHost } from '../lib/browser-electron/remote-host.js'
+
+// These tests spawn real children, and the host writes one line per spawn and
+// per exit to `$DSH_HOME/logs/dsh-builtin-browser-host.log` — the very log an
+// operator reads to diagnose a crash loop. Without isolation this file appends
+// synthetic spawn/exit records (identifiable only by `electron=<node.exe>`) to
+// that real log and makes its history unreadable.
+//
+// Module scope on purpose, not a `before()` hook: the host reads DSH_HOME when it
+// writes, and a hook that runs after the first test body would already be too
+// late. The temp directory simply outlives the process.
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'dsh-hostlog-recovery-'))
 
 /**
  * Regression for issue #5: after the browser host dies (crash, or the DSH

@@ -8,7 +8,7 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BrowserA11yRequest, BrowserA11yResult, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie } from './types.js';
+import type { BrowserA11yRequest, BrowserA11yResult, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserElementTarget, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillRequest, BrowserFillResult, BrowserGetValueRequest, BrowserGetValueResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScrapeRequest, BrowserScrapeResult, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSelectRequest, BrowserSelectResult, BrowserSessionId, BrowserSetValueRequest, BrowserSetValueResult, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserChallenge, ExportedCookie, VisitedPage } from './types.js';
 export { BrowserError, } from './types.js';
 export type { BrowserA11yNode, BrowserA11yRequest, BrowserA11yResult, BrowserChallenge, BrowserCheckRequest, BrowserClearRequest, BrowserClickRequest, BrowserContentFormat, BrowserElementTarget, BrowserGetValueRequest, BrowserGetValueResult, BrowserScrapeField, BrowserScrapeRequest, BrowserScrapeResult, BrowserSelectRequest, BrowserSelectResult, BrowserSetValueRequest, BrowserSetValueResult, BrowserWaitRequest, BrowserWaitResult, BrowserScrollRequest, BrowserKeyRequest, BrowserContentRequest, BrowserContentResult, BrowserDownloadRequest, BrowserExecuteRequest, BrowserExecuteResult, BrowserFillField, BrowserFillRequest, BrowserFillResult, BrowserHistoryEntry, BrowserNavigateRequest, BrowserOpenRequest, BrowserProvider, BrowserScreenshotRequest, BrowserScreenshotResult, BrowserSessionId, BrowserSnapshotElement, BrowserSnapshotResult, BrowserTab, BrowserTypeRequest, ExportedCookie, } from './types.js';
 declare module '@deepseek-ai/cordis' {
@@ -118,6 +118,23 @@ export declare class BrowserRuntime extends Service {
     detectChallenge(session: BrowserSessionId, signal?: AbortSignal): Promise<BrowserChallenge>;
     /** Return the session's chronological operation log through the provider. */
     history(session: BrowserSessionId): Promise<readonly BrowserHistoryEntry[]>;
+    /**
+     * Persisted visits, newest first — the record that outlives the browser
+     * process, as opposed to {@link history}'s session-scoped operation log.
+     * @param options - result cap and an optional hostname filter.
+     * @returns the retained visits (empty when history recording is disabled).
+     */
+    visited(options?: {
+        readonly limit?: number;
+        readonly domain?: string;
+    }): readonly VisitedPage[];
+    /**
+     * Whether a session is still live. Sessions can end outside the tool layer
+     * (the human closed its window), so a cached id must be re-checked before
+     * reuse; a provider that does not implement the check counts as live.
+     * @param session - the session id to test.
+     */
+    exists(session: BrowserSessionId): boolean;
     /** Replay one recorded operation by sequence number through the provider. */
     replay(session: BrowserSessionId, seq: number): Promise<void>;
     /** Download a URL to a local file through the provider. */
