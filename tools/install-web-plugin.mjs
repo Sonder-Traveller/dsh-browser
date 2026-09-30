@@ -29,9 +29,29 @@
  */
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const HOME = process.env.DSH_HOME ?? 'D:\\dsh-home'
+/**
+ * Where the DSH home is.
+ *
+ * Same default DSH itself uses, so this works on a machine it has never seen: an
+ * explicit `DSH_HOME`, else `~/.dsh`. Nothing here is tied to the machine this was
+ * written on.
+ */
+const HOME = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+/**
+ * The deepseek-harness checkout.
+ *
+ * It has no conventional location — it is wherever the user cloned it — so this is
+ * never guessed. Everything that needs it says so plainly instead of silently
+ * looking in the wrong place.
+ */
+const HARNESS = process.env.DSH_HARNESS
+if (HARNESS === undefined || HARNESS === '') {
+  console.error('set DSH_HARNESS to your deepseek-harness checkout (this script needs the repo\'s node_modules layout)')
+  process.exit(1)
+}
 const PROFILE = join(HOME, 'profiles', 'web')
 const PACKAGE = join(PROFILE, 'package.json')
 const PLUGIN = 'dsh-builtin-browser'
@@ -41,16 +61,16 @@ const HERE = import.meta.dirname
  *
  * It is a separate, environment-specific script rather than part of this package, so
  * this script looks for it in the places it has actually been kept: beside this file,
- * beside the DSH checkout, and one level up (its historical home). `DSH_REPAIR_TOOL`
- * overrides the search when it lives somewhere else entirely.
+ * beside the harness checkout, and one level up. `DSH_REPAIR_TOOL` overrides the
+ * search when it lives somewhere else entirely — and if none of them exist, the
+ * failure says so rather than pretending the profile is fine.
  */
 function findRepairTool() {
   const candidates = [
     process.env.DSH_REPAIR_TOOL,
     join(HERE, 'repair-web-profile.mjs'),
-    join(process.env.DSH_HARNESS ?? 'D:\\deepseek-harness', 'scripts', 'repair-web-profile.mjs'),
+    join(HARNESS, 'scripts', 'repair-web-profile.mjs'),
     join(HERE, '..', 'repair-web-profile.mjs'),
-    'D:\\dsh-legacy-archive\\repair-web-profile.mjs',
   ].filter(candidate => typeof candidate === 'string' && candidate !== '')
   return candidates.find(candidate => existsSync(candidate))
 }
@@ -64,7 +84,7 @@ function findRepairTool() {
  * one pnpm materializes, and the one four plugins break on.
  */
 const CHECKS = [
-  { path: join(process.env.DSH_HARNESS ?? 'D:\\deepseek-harness', 'packages', 'core', 'tools', 'node_modules'), expect: 'directory' },
+  { path: join(HARNESS, 'packages', 'core', 'tools', 'node_modules'), expect: 'directory' },
   { path: join(HOME, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-tools'), expect: 'junction' },
 ]
 
