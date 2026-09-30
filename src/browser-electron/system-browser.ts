@@ -203,6 +203,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * @returns the connected client.
    */
   private async ensureClient(): Promise<CdpClient> {
+    // A disposed host must never start a browser: doing so would spawn a process
+    // nobody owns and nobody will kill.
+    if (this.disposed) throw new Error('dsh-builtin-browser: this browser host was released')
     if (this.client !== undefined) return this.client
     // Concurrent first calls share one startup rather than racing two browsers.
     this.starting ??= this.start().finally(() => { this.starting = undefined })
@@ -236,8 +239,12 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     const portFile = join(this.profileDir, 'DevToolsActivePort')
     const deadline = Date.now() + 30_000
     for (;;) {
-      if (Date.now() > deadline) { child.kill(); this.child = undefined; break }
-      if (child.exitCode !== null) { this.child = undefined; break }
+      // Released while we were starting: stop here rather than keep polling for a
+      // browser that dispose() has already killed, which would leave a connection
+      // to a dead process behind.
+      if (this.disposed) { child.kill(); if (this.child === child) this.child = undefined; break }
+      if (Date.now() > deadline) { child.kill(); if (this.child === child) this.child = undefined; break }
+      if (child.exitCode !== null) { if (this.child === child) this.child = undefined; break }
       if (existsSync(portFile)) {
         try {
           const port = readFileSync(portFile, 'utf8').split('\n')[0]?.trim() ?? ''
@@ -246,6 +253,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
               await client.whenReady()
+              // Still wanted? A dispose() during the handshake has already killed the
+              // process, so publishing the client would leave a dangling connection.
+              if (this.disposed) { client.close(); break }
               this.client = client
               return client
             }

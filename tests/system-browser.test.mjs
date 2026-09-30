@@ -77,3 +77,22 @@ test('an unused host never spawns anything', () => {
   host.dispose()
   assert.equal(host.started, false)
 })
+
+// A released host must stay released: using it afterwards would spawn a browser
+// nobody owns and nobody will kill. (`available()` correctly reports false here,
+// which is also what stops the plugin from routing work to a dead carrier.)
+test('a released host refuses to start a browser', async () => {
+  const host = new SystemBrowserViewHost(
+    { kind: 'chrome', path: join(tmpdir(), 'never-a-browser.exe') },
+    mkdtempSync(join(tmpdir(), 'dsh-browser-profile-')),
+  )
+  host.dispose()
+  assert.equal(host.available(), false, 'a disposed host reports itself unusable')
+  const view = host.createView()
+  await assert.rejects(
+    () => view.sendCommand('Runtime.evaluate', { expression: '1' }),
+    /released/,
+    'the command fails instead of launching anything',
+  )
+  assert.equal(host.started, false, 'and no process was spawned')
+})
