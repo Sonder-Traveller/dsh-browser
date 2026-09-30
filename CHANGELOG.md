@@ -762,7 +762,7 @@ README 中英同步:更新记录新增五行;`browser_download`/`browser_screens
 
 **背景**:DSH 进入 0.2 线(`@deepseek-ai/dsh@0.2.0-rc.2`,peer 包 `dsh-llm` / `dsh-tools` / `dsh-system-prompt` 同步到 `0.2.0-rc.2`),而插件此前的兼容性声明是 `>=0.1.1-rc.1 <0.2.0` —— 声明层面把 0.2 挡在外面(DSH-Store 会据此判定不兼容)。
 
-**核对与实测**:插件的运行时依赖面很窄 —— `@deepseek-ai/cordis`(`Context`/`Service`)、`@deepseek-ai/dsh-tools`(`defineTool`)、`@deepseek-ai/dsh-llm`(`HarnessError`)、`@deepseek-ai/schemastery`。在**真实 0.2.0-rc.2 宿主**上跑通了完整链路:`browser_session` 返回会话与标签;`browser_open https://example.com` 导航成功并返回快照元素;`browser_screenshot` 三态验证 —— 越界路径被 `must be inside downloadDir "C:\Users\FB\Downloads"` 拒绝、合法路径写入成功、同名文件被 `refusing to overwrite existing file` 拒绝。结论:核心 API 未发生破坏性变更,**无需改代码**。
+**核对与实测**:插件的运行时依赖面很窄 —— `@deepseek-ai/cordis`(`Context`/`Service`)、`@deepseek-ai/dsh-tools`(`defineTool`)、`@deepseek-ai/dsh-llm`(`HarnessError`)、`@deepseek-ai/schemastery`。在**真实 0.2.0-rc.2 宿主**上跑通了完整链路:`browser_session` 返回会话与标签;`browser_open https://example.com` 导航成功并返回快照元素;`browser_screenshot` 三态验证 —— 越界路径被 `must be inside downloadDir "C:\Users\<user>\Downloads"` 拒绝、合法路径写入成功、同名文件被 `refusing to overwrite existing file` 拒绝。结论:核心 API 未发生破坏性变更,**无需改代码**。
 
 **改动**:`peerDependencies` 里三个 dsh 包的范围由 `^0.1.1-rc.2` 改为 `>=0.1.1-rc.2 <0.3.0`(`cordis` 的 `^4.0.1`、`schemastery` 的 `^3.18.1` 本已覆盖 0.2 所用的 4.0.4 / 3.18.4);`dsh.compatibility.dsh` 由 `>=0.1.1-rc.1 <0.2.0` 放宽为 `>=0.1.1-rc.1 <0.3.0`;`dshReleases` 增加 `0.2.0-rc.1` / `0.2.0-rc.2` = `compatible`。
 
