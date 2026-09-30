@@ -741,3 +741,27 @@ README 中英同步:更新记录新增五行;`browser_download`/`browser_screens
 **验证**:`tsc -p tsconfig.json` 零错误;`node --test tests/*.test.mjs` **47/47 全绿**(新增 7 条:3 条键盘聚焦(次序 / 宿主无 `focus` / 聚焦抛错也不影响按键)+ 1 条探测冷却窗口 + 3 条定位判词);真实宿主端到端脚本 **17/17**(新增一步:从未被点击过的页面收到第一个键);真实宿主定位判词脚本 **4/4**(合法但不存在 / 解析错误即刻终止 / 文本目标仍可点击 / 判词抢先于外层超时)。
 
 **边界与状态**:未 bump 版本、未发布(发布时 bump)。缺陷 1 仅影响 Windows,缺陷 2/3/4 与平台无关,但 macOS / Linux 真机未复测。
+
+---
+
+## 第十九轮(2026-10-01,DSH 0.2.0-rc.2 兼容性)
+
+**背景**:DSH 进入 0.2 线(`@deepseek-ai/dsh@0.2.0-rc.2`,peer 包 `dsh-llm` / `dsh-tools` / `dsh-system-prompt` 同步到 `0.2.0-rc.2`),而插件此前的兼容性声明是 `>=0.1.1-rc.1 <0.2.0` —— 声明层面把 0.2 挡在外面(DSH-Store 会据此判定不兼容)。
+
+**核对与实测**:插件的运行时依赖面很窄 —— `@deepseek-ai/cordis`(`Context`/`Service`)、`@deepseek-ai/dsh-tools`(`defineTool`)、`@deepseek-ai/dsh-llm`(`HarnessError`)、`@deepseek-ai/schemastery`。在**真实 0.2.0-rc.2 宿主**上跑通了完整链路:`browser_session` 返回会话与标签;`browser_open https://example.com` 导航成功并返回快照元素;`browser_screenshot` 三态验证 —— 越界路径被 `must be inside downloadDir "C:\Users\FB\Downloads"` 拒绝、合法路径写入成功、同名文件被 `refusing to overwrite existing file` 拒绝。结论:核心 API 未发生破坏性变更,**无需改代码**。
+
+**改动**:`peerDependencies` 里三个 dsh 包的范围由 `^0.1.1-rc.2` 改为 `>=0.1.1-rc.2 <0.3.0`(`cordis` 的 `^4.0.1`、`schemastery` 的 `^3.18.1` 本已覆盖 0.2 所用的 4.0.4 / 3.18.4);`dsh.compatibility.dsh` 由 `>=0.1.1-rc.1 <0.2.0` 放宽为 `>=0.1.1-rc.1 <0.3.0`;`dshReleases` 增加 `0.2.0-rc.1` / `0.2.0-rc.2` = `compatible`。
+
+**验证**:`tsc` 零错误;`node --test tests/*.test.mjs` **47/47 全绿**;上述真实宿主端到端三态验证。
+
+**状态**:已改未提交,未 bump 版本、未发布(发布时 bump)。
+
+---
+
+## 0.1.23 发布(2026-10-01)
+
+bump `0.1.22 → 0.1.23`,把**第十八轮**(PR #15:Windows 合成输入三连 —— 遮挡导致输入被丢弃 / 首击丢失 / 首键丢失,外加 Electron 探测自愈与定位判词可读性;此前已合入 master 但一直未发版)与**第十九轮**(DSH 0.2 兼容性声明)随版本发布,tag `v0.1.23`。
+
+README 中英同步:更新记录新增两行;兼容性说明从 `<0.2.0` 更新为覆盖 0.2 线。
+
+**验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **47/47 全部通过**;真实 `dsh web` 0.2.0-rc.2 宿主上跑通会话 / 导航 / 快照 / 截图三态。

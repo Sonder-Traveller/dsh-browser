@@ -312,7 +312,10 @@ npm run build
 | **0.1.22** | 2026-09-16 | **发布**:macOS 二进制探测修复(issue #9 / #14)与第十五~十七轮(issue #11 工具栏 SyntaxError / #10 自托管三连 / #13 截图 savePath + 下载目录)随 **0.1.22** 收录(构建零错误、**35 项测试全绿**,tag `v0.1.22`) |
 | 第十八轮 | 2026-09-20 | **Windows 真机三连 + 探测自愈 + 定位判词**(真实 `dsh web` 自托管宿主实测,缺陷①~④同为「CDP 报成功、页面没收到」):① Windows 的 `CalculateNativeWinOcclusion` 把被遮挡的插件窗口判定为 HIDDEN → 整站停帧,且每条合成鼠标/键盘事件被渲染端静默丢弃(CanReceiveInput=false)而 CDP 回 `{}` → 子进程 ready 前追加 `disable-features=CalculateNativeWinOcclusion`(仅 win32);② `click()` 缺前置 `mouseMoved`,新视图第一次点击落空 → 改为 move→press→release;③ 新视图从未持有 web focus,`browser_key` 第一次调用无效 → 宿主新增 `focus` op(view handle 可选 `focus?()`),`key()` 派发前 best-effort 聚焦,并在焦点需要移动时等 80ms(焦点落地异步,同轮派发的键仍会被丢);④ `available()` 把**失败**探测按宿主生命周期永久缓存,而 provider 选择每进程一次 → Electron 晚于 DSH 到位就永远接不上 → 成功仍缓存、失败 30s 冷却后重探(`DSH_BROWSER_PROBE_RETRY_MS`),`resolveProvider()` 报错区分「一个都没注册」与「注册了但自报不可用」并附处置;⑤ **定位失败被外层超时掩盖** —— 页内定位脚本会把预算轮询到底才回答,外层却用同一个预算,于是 `browser: click timed out after 10000ms` 抢走了页内早已写好的判词;而 css/xpath **解析失败**(选择器根本不合法)也被写成「还没找到」,对着永远不可能匹配的东西把预算轮完 → 解析失败即刻终止并报 `invalid CSS selector "…" / invalid XPath …`;外层给页内判词 2s 传输余量;未命中判词补上提供方实际采用的策略(`by` 缺省即 `"by":"css"`)与实际耗时;`scrape` 的 item 选择器同样即刻失败(同一个漏写 `by` 的调用:修前 `click timed out after 10000ms`,修后 `element not found: {"value":"Learn more","by":"css"} (looked for 10000ms)`);新增 7 条回归测试(**47/47 全绿**),真实宿主端到端 **17/17** + 定位判词 **4/4** |
 
-> registry 上的最新版本以顶部 npm 徽章为准:本次 `0.1.22` 已入库并打 tag;若徽章仍显示 `0.1.21`,说明该版本尚未 publish。
+| 第十九轮 | 2026-10-01 | **DSH 0.2 兼容性**:DSH 进入 0.2 线(`@deepseek-ai/dsh@0.2.0-rc.2`,peer 包 `dsh-llm`/`dsh-tools`/`dsh-system-prompt` 同步到 `0.2.0-rc.2`),而原声明 `>=0.1.1-rc.1 <0.2.0` 把 0.2 挡在门外 → 在**真实 0.2.0-rc.2 宿主**上实测插件的运行时依赖面(`cordis` 的 Context/Service、`dsh-tools` 的 defineTool、`dsh-llm` 的 HarnessError、`schemastery`),确认无破坏性变更:会话、导航、快照、截图三态(越界拒绝/合法写入/覆盖拒绝)全部通过 → `peerDependencies` 三个 dsh 包范围改为 `>=0.1.1-rc.2 <0.3.0`,`dsh.compatibility.dsh` 放宽为 `>=0.1.1-rc.1 <0.3.0`,`dshReleases` 增加 `0.2.0-rc.1`/`0.2.0-rc.2` = compatible |
+| **0.1.23** | 2026-10-01 | **发布**:第十八轮(PR #15:Windows 合成输入三连 + Electron 探测自愈 + 定位判词)与第十九轮(DSH 0.2 兼容)随 **0.1.23** 发布(构建零错误、**47 项测试全绿**,tag `v0.1.23`) |
+
+> registry 上的最新版本以顶部 npm 徽章为准:本次 `0.1.23` 已入库并打 tag;若徽章仍显示 `0.1.22`,说明该版本尚未 publish。
 
 ## 特别感谢
 
