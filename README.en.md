@@ -26,21 +26,44 @@
 
 `dsh-builtin-browser` adds browser capability to [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness):
 
-- **A real view, not a relay**: the browser is a native `WebContentsView`; the human sees every step the agent takes and can grab control at any time;
-- **Install-and-use**: with a desktop shell the shell's embedded view is used; on plain `dsh web` the plugin **self-hosts** — it spawns its own Electron window with zero extra configuration;
+- **A real page, not a relay**: the page is carried by a **real browser** — on the desktop it is the one in the official sidebar, on plain `dsh web` it is a window the plugin launches, and either can be switched to an **installed Chrome / Edge** in settings. The human sees exactly what the agent is doing and can take over at any time;
+- **One page for both parties** (desktop): the page the agent works on is the **same** page the human sees — no longer a window you cannot see;
+- **Works out of the box**: the carrier is chosen automatically (the desktop sidebar first, otherwise self-hosting), and plain `dsh web` needs no extra configuration at all;
 - **One plugin, one toolset**: after install the agent automatically gets 34 `browser_*` tools (open, a11y tree, wait, semantic/coordinate interaction, scroll, back/forward, batch and single-control form filling, keys, structured scraping, screenshot, download, auth management…).
 
 In one sentence: **installing the plugin gives you a real browser that is shared with the user and drivable by the agent.**
 
 ## Quick start
 
-```sh
-# Option 1: install from npm (published)
-dsh plugin --profile web add dsh-builtin-browser
+Install the plugin into the profile of **the host you want to use**. Installing it on both is fine — one codebase, one copy per profile.
 
-# Option 2: install from a checkout (one plugin, one repository)
+**Web (plain `dsh web`)**
+
+```sh
+# install from npm
+dsh plugin --profile web add dsh-builtin-browser
+# or from a checkout (one plugin, one repository)
 dsh plugin --profile web add <path-to-this-repo>
 ```
+
+**Desktop (DSH Desktop)**
+
+```sh
+# 1. install into the desktop profile
+dsh plugin --profile desktop add dsh-builtin-browser
+
+# 2. desktop-only step: let the plugin drive the official sidebar's page
+node <path-to-this-repo>/desktop-bridge/install.mjs
+```
+
+> **Step 2 is not optional, and it comes back every time**: a desktop upgrade replaces `resources/app/`, and the bridge goes with it; a plugin update needs the same re-run. With no bridge the plugin falls back to opening its own separate window — nothing breaks, you just lose "one page for both parties". The web side has **no** such step.
+
+**Updating** (the two hosts differ — see [Updating (the two hosts differ)](#updating-the-two-hosts-differ))
+
+| Host | Steps |
+| --- | --- |
+| Web | update the profile dependency → restart `dsh web` |
+| Desktop | update the dependency → **re-run `node desktop-bridge/install.mjs`** → restart DSH Desktop |
 
 After install the agent can use the browser tools, e.g.:
 
@@ -64,13 +87,13 @@ See the full list in [Tool reference](#tool-reference).
     </td>
     <td width="50%" valign="top">
       <h3>DOM-level driving, framework-friendly</h3>
-      <p><code>browser_snapshot</code> returns numbered interactive elements; <code>browser_execute</code> runs JS in the page (native setters + input/change events for controlled inputs), so React/Vue pages work reliably.</p>
+      <p><code>browser_snapshot</code> returns numbered interactive elements; <code>browser_execute</code> runs JS in the page (native setters + input/change events for controlled inputs), so React/Vue pages work reliably. <b>Semantic targeting comes first</b> — the whole page stays operable without any image input; under the <b>non-visual</b> strategy a coordinate click that depends on a screenshot is refused, with an instruction to use a semantic target instead.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>Multi-tab sessions</h3>
-      <p>Open URLs in parallel tabs; list/switch/close/reset tabs while each session keeps its own state.</p>
+      <p>Open URLs in parallel tabs; list/switch/close/reset tabs while each session keeps its own state. On the desktop <b>each session gets its own tab in the sidebar</b>, so ending one session does not disturb another.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Multi-format content</h3>
@@ -124,17 +147,17 @@ See the full list in [Tool reference](#tool-reference).
     </td>
     <td width="50%" valign="top">
       <h3>Synthetic cursor</h3>
-      <p>While the agent works, a virtual pointer and click ripple are drawn inside the page — <b>its appearance means the agent has taken over that tab</b>. DOM-level actions (set value, check, select) also show a landing point. Can be switched off in settings.</p>
+      <p>While the agent works, a virtual pointer and click ripple are drawn inside the page, with a <b>bubble labelling the current action</b> beside the pointer — <b>its appearance means the agent has taken over that tab</b>. DOM-level actions (set value, check, select) also show a landing point. It never moves the real system pointer, and can be switched off in settings.</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>A "Browser" section in Settings</h3>
-      <p>Keep history / keep cookies / auto-expand the side panel / close the browser when a session ends / show the cursor / vision strategy / allow credential reads — switches take effect <b>immediately</b>, no restart.</p>
+      <p><b>Which browser</b> (bundled Electron / installed Chrome / installed Edge / automatic), keep history / keep cookies / auto-expand the side panel / close the browser when a session ends / show the cursor / vision strategy / allow credential reads — switches take effect <b>immediately</b>, no restart.</p>
     </td>
     <td width="50%" valign="top">
       <h3>Unambiguous teardown</h3>
-      <p><b>Closing the browser window ends that session</b> (the next open is a clean one) while browsing history and login state survive; <b>collapsing the interface is only a collapse</b> and the browser keeps running in the background.</p>
+      <p><b>Closing the page that carries it ends that session</b> (the next open is a clean one) — on the desktop that means closing the sidebar's browser tab, on the web closing the window — while browsing history and login state survive. <b>Collapsing the interface is only a collapse</b>: the browser keeps running. Whether the browser is released automatically when a session ends is a setting.</p>
     </td>
   </tr>
 </table>
@@ -208,11 +231,11 @@ See the full list in [Tool reference](#tool-reference).
 
 ## Configuration
 
-The plugin mounts through `cordis.patch.yml` (three rows); per-row config:
+The plugin mounts through `cordis.patch.yml` (**four rows**): one **inert root row** (it exists only to name the package, because the host's client-module scan resolves a row's specifier to a package root — a row named after a subpath is skipped, and then the settings panel would never appear) plus three functional rows (`browser` / `browser-electron` / `tool-browser`). Per-row config:
 
 | Row | Key | Type | Default | Description |
 | --- | --- | --- | --- | --- |
-| `browser-electron` | `viewHost` | object | required | `ElectronBrowserViewHost` supplied by the host shell (typically `!!js ctx.get('electronViewHost')`) |
+| `browser-electron` | `viewHost` | object | optional | `ElectronBrowserViewHost` instance supplied by the host (typically `!!js ctx.get('electronViewHost')`). **When it is absent the plugin picks the carrier itself** — the desktop sidebar if that is where it runs, otherwise self-hosting; a browser chosen in settings outranks both |
 | `browser-electron` | `httpOnly` | boolean | `true` | Allow HTTP(S) navigation only; other protocols (e.g. `file:`/`data:`) rejected (`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | number | `60` | Max snapshot elements before truncation |
 | `browser-electron` | `contentMaxChars` | number | `100000` | Default content character cap |
@@ -226,12 +249,14 @@ The plugin mounts through `cordis.patch.yml` (three rows); per-row config:
 agent (browser_* tools)
   → ctx.browser (seam, dsh-builtin-browser/browser)
   → dsh-builtin-browser/browser-electron (provider)
-  → ElectronBrowserViewHost (supplied by the host shell)
-  → WebContentsView + webContents.debugger (CDP)
+  → ElectronBrowserViewHost  ← the same seam, implemented once per carrier
+      ① desktop sidebar       via bridge → shell main process → webContents.debugger (CDP)
+      ② installed Chrome/Edge via WebSocket → CDP
+      ③ self-hosted Electron  via loopback TCP JSON-RPC → child process → CDP
 ```
 
 - **Seam** (`browser` row): provides the `ctx.browser` service — provider registration, session lifecycle, error codes — decoupled from any implementation.
-- **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
+- **Provider** (`browser-electron` row): knows only the one `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), so **switching carrier touches neither the tools, nor the history, nor the cursor, nor the teardown logic**.
 - **Tools** (`tool-browser` row): the 34 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
 **Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC. The RPC is authenticated with a random per-spawn token delivered over **both stdin and an environment variable** — on Windows the Electron GUI process never receives piped stdin, so the env fallback keeps the handshake reliable. The child auto-restarts after a crash; the plugin prefers its own bundled electron package — packaged app executables (e.g. DSH Desktop.exe) are never reused as the spawnable binary, which would launch the app itself and exit immediately; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the Electron lookup order follows below (33.x has a compositor defect; ≥ 40 recommended; the electron 44+ package no longer downloads its binary at install time — if it is missing on first use, the tool errors and tells you to run `npx install-electron` first, needs network).
@@ -304,6 +329,7 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 | DeepSeek Harness (dsh) | `0.2.0-rc.2` (peer range `>=0.1.1-rc.2 <0.3.0`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
+| Installed Chrome / Edge (optional carriers) | `154.0.8037.58` / `154.0.4258.37` |
 | dsh-builtin-browser | `0.3.0` |
 | OS | Windows 10 (10.0.26200) |
 
@@ -315,18 +341,25 @@ The plugin has one installation per host, and the two are updated separately —
 
 **Desktop (DSH Desktop)**
 - The plugin is a dependency of the desktop profile (usually `$DSH_HOME/profiles/desktop`). Updating means moving that dependency to the new version and then **restarting DSH Desktop**, which is when the settings panel and the tools pick up the new code.
-- The browser engine is the desktop app's own Electron; the plugin never downloads a second copy.
+- **The desktop has one extra step, which the web does not**: the bridge that lets the plugin drive the sidebar lives in the **desktop app's own install directory** (`resources/app/`), and a plugin update does **not** carry it along. A desktop upgrade replaces that directory and takes the bridge with it, so re-run it once:
+  ```bash
+  node desktop-bridge/install.mjs            # idempotent; refreshes the module if already installed
+  node desktop-bridge/install.mjs --revert   # roll back
+  ```
+  With no bridge the plugin falls back to self-hosting (one extra separate window) — nothing breaks, the tools stay available.
+- The browser engine comes from the desktop app's own Electron by default, and the plugin never downloads a second copy; you can also point it at an installed Chrome / Edge in settings.
 - Upgrading the desktop app itself does not carry the plugin along; update it as described above.
 
 **Web (`dsh web`)**
 - The plugin is a dependency of the web profile (`$DSH_HOME/profiles/web`); **restart `dsh web`** after updating.
 - There is no desktop shell, so the shared browser is self-hosted by the plugin: the first install may need an Electron binary. If the package manager's build allow-list blocked it (pnpm v10+ blocks `electron`'s postinstall), run `npx install-electron` once to fetch it.
+- It can equally be pointed at an installed Chrome / Edge in settings — an option that behaves the **same on both hosts**.
 - Update it the same way you installed it (npm package `dsh-builtin-browser`, the GitHub repo `wqty123/dsh-browser`, or a local directory).
 
 **What is the same on both**
-- The toolset (34 `browser_*` tools), the "Browser" section in Settings, and how browsing history and cookies persist are identical; only the carrier of the browser window differs (desktop shell vs. plugin-hosted).
-- Upgrading loses no data: history and settings live in `$DSH_HOME/dsh-builtin-browser-host/` (`history.jsonl`, `settings.json`), and login state sits in the same profile directory.
-- If history behaves unexpectedly after an upgrade, check **Settings → Browser**: history defaults to **on**, one-time auto-expand defaults to **on**, and closing the browser when a session ends defaults to **off**.
+- The toolset (34 `browser_*` tools), the "Browser" section in Settings, and how browsing history and cookies persist are identical; only the carrier of the page differs (the official sidebar on the desktop, the plugin's own self-hosted window on the web, or an installed browser you picked in settings).
+- Upgrading loses no data: history and settings live in `$DSH_HOME/dsh-builtin-browser-host/` (`history.jsonl`, `settings.json`), and login state sits in the same profile directory — including the `<chrome|edge>-profile` used for an installed browser.
+- If history behaves unexpectedly after an upgrade, check **Settings → Browser**: history defaults to **on**, one-time auto-expand defaults to **on**, closing the browser when a session ends defaults to **off**, and the carrier defaults to **bundled**.
 
 ## Known limitations
 
@@ -393,17 +426,24 @@ Code layout:
 | 15 | 2026-09-16 | **Toolbar parse-time SyntaxError** (issue #11): the inline script's `const bridge = window.bridge` collided with the non-configurable global installed by `contextBridge.exposeInMainWorld` (`HasRestrictedGlobalProperty`) → a **parse-time** early error, so not one line ran and the address bar, the four nav buttons, the tab strip and the error bar were all dead → the whole script is wrapped in an IIFE and the handle renamed `tb`, making the class of collision structurally impossible; 3 toolbar regression tests parse the snippets out of the **published artifact** and execute them in a `vm` under contextBridge semantics |
 | 16 | 2026-09-16 | **Self-hosted trio fixes** (issue #10): (1) `browser_open` waits (bounded 5 s) for the new document to settle via a `performance.timeOrigin` fingerprint + `readyState`, so it no longer returns a titled-but-empty snapshot; (2) a new waiting `presentView` barrier (materialize the view, then showView, then a ping barrier; child dispatch is strictly serial) is required before `click`/`type`/`key` dispatch `Input.*`, which now fail loudly with `BROWSER_VIEW_NOT_PRESENTED` instead of faking success; (3) `createView` preloads `about:blank` (bounded 3 s) so a fresh view always has a live renderer (the step that wedged after a host restart); (4) `did-navigate` forces re-presentation, host commands are bounded at 20 s, child stderr plus exit code/signal go to `$DSH_HOME/logs/dsh-builtin-browser-host.log` (2 MB self-truncating), and `locateTab` accepts a bare uuid as well as `tab:<uuid>` |
 | 17 | 2026-09-16 | **Screenshot savePath confined + localized download dir** (issue #13): `browser_screenshot` wrote straight to `writeFileSync` — anywhere the process could reach, silently replacing existing files (bypassing the read-only sandbox's write protection) → one shared `admitSavePath` gate for downloads AND screenshots (absolute, inside `downloadDir`, never overwriting an existing file), plus parent-directory creation for screenshots; the default download directory is no longer hardcoded to `~/Downloads` but probed in order: `downloadDir` → `XDG_DOWNLOAD_DIR` → `~/Downloads` / `~/下载` / `~/下載` → fallback (a Chinese desktop needs no configuration) |
-
 | **0.1.22** | 2026-09-16 | **Release**: the macOS binary-probe fix (issues #9 / #14) and rounds 15–17 (issue #11 toolbar SyntaxError / #10 self-hosted trio / #13 screenshot savePath + download dir) ship as **0.1.22** (build clean, **35/35 tests pass**, tag `v0.1.22`) |
 | Round 18 | 2026-09-20 | **Windows on-device trio + probe self-healing + locate verdicts** (measured on a real self-hosted `dsh web` host; defects ①–④ were all the "CDP answered success, the page received nothing" kind): ① Chromium's `CalculateNativeWinOcclusion` marks the plugin window HIDDEN while another window covers it — the page stops producing frames and **every** synthesized mouse/key event is dropped by the renderer (`CanReceiveInput()` false) while CDP replies `{}` → the child appends `disable-features=CalculateNativeWinOcclusion` before `app.whenReady()` (win32 only); ② `click()` had no leading `mouseMoved`, so the first click on a fresh view was routed away and lost → now move→press→release; ③ a fresh view holds no web focus, so the FIRST `browser_key` of a session vanished → new host `focus` op (optional `focus?()` on the view handle), `key()` focuses best-effort before dispatch and waits 80ms only when focus had to move (focus lands asynchronously; a key dispatched in the same turn is still dropped); ④ `available()` cached a FAILED Electron probe for the host's lifetime while provider selection runs once per process, so an Electron that arrived after DSH started was never adopted → successes stay cached, failures re-probe after a cooldown (`DSH_BROWSER_PROBE_RETRY_MS`, default 30s), and `resolveProvider()` now distinguishes "no provider registered" from "registered but reports itself unavailable" with the matching remedy; ⑤ **a failed locate was masked by the outer timeout** — the in-page locate script polls for its whole budget and answers only afterwards, while the outer wait used the SAME budget, so `browser: click timed out after 10000ms` won the race and the in-page verdict never got out; a css/xpath **parse error** also reported as "not found yet", polling a selector that can never become valid. Now a parse error is terminal and names itself (`invalid CSS selector "…" / invalid XPath …`), the outer wait gives the in-page answer 2 s of transport grace, and a miss reports the strategy the provider assumed (`by` defaults to `"by":"css"`) plus the time spent; `scrape`'s item selector fails the same way at once. Same call: before `click timed out after 10000ms`, after `element not found: {"value":"Learn more","by":"css"} (looked for 10000ms)`. 7 new regression tests (**47/47 pass**), 17/17 end-to-end steps against the real host, plus 4/4 locate-verdict steps |
-
 | 19 | 2026-10-01 | **DSH 0.2 compatibility**: DSH moved to the 0.2 line (`@deepseek-ai/dsh@0.2.0-rc.2`, with `dsh-llm`/`dsh-tools`/`dsh-system-prompt` following to `0.2.0-rc.2`), while our declaration `>=0.1.1-rc.1 <0.2.0` shut 0.2 out → verified the plugin's (narrow) runtime dependency surface against a **real 0.2.0-rc.2 host** (`cordis` Context/Service, `dsh-tools` defineTool, `dsh-llm` HarnessError, `schemastery`) and found no breaking change: session, navigation, snapshot and the screenshot trio (outside-path refused / legal write / overwrite refused) all pass → peer ranges for the three dsh packages widened to `>=0.1.1-rc.2 <0.3.0`, `dsh.compatibility.dsh` widened to `>=0.1.1-rc.1 <0.3.0`, and `dshReleases` gained `0.2.0-rc.1`/`0.2.0-rc.2` = compatible |
 | **0.1.23** | 2026-10-01 | **Release**: round 18 (PR #15: the Windows synthesized-input trio + Electron probe self-healing + locate verdicts) and round 19 (DSH 0.2 compatibility) ship as **0.1.23** (build clean, **47/47 tests pass**, tag `v0.1.23`) |
 | Round 20 | 2026-10-01 | **Browsing history / settings panel / synthetic cursor / teardown**: (1) **persistent browsing history** (`history-store`: append-only JSONL beside the browser profile; capped at 5000 entries or 90 days, whichever comes first; a damaged line loses only itself) plus the new **`browser_visited`** tool (tool count **33 → 34**), reopening via `browser_open`; (2) a "Browser" section in Settings (hand-written client bundle registered into `settings.section` with `order: 60`, below the host's own rows) served by `GET/PUT /dsh-builtin-browser/settings` (same-origin guard, 64 KiB cap) over a `settings-store` document (per-field validation, unknown keys dropped, malformed file falls back to defaults) — **switches take effect immediately** because the provider reads the document on every use; (3) an in-page **synthetic cursor** (inline styles + Web Animations, so a page's `style-src` CSP cannot drop it; `buildTargetScript` now attaches the element centre as `__point`, which gives click / type / setValue / check / select / clear **a landing point**) — **its appearance means the agent has taken over that tab**; (4) **closing a window ends its session**: on `closed` the host releases every view's `webContents` (a BrowserWindow does not destroy child views, so each window would otherwise leak a renderer) and reports `viewClosed`; the provider ends that session and the seam gains `exists()` so the tool layer re-checks a cached session — the next call gets a **clean session** while browsing history and login state survive. 21 new tests (**68/68 pass**) |
 | Round 20 addendum | 2026-10-01 | **Root cause of the invisible settings panel, plus crash diagnostics**: (1) On a real host the panel did not appear — the cause is that all three `cordis.patch.yml` rows were registered under **subpath** names (`dsh-builtin-browser/browser`), while the host's client-module scan resolves a row's specifier to a **package root** (`exactPackageSpecifier` returns `undefined` as soon as it sees a `/`), leaving the package with no row to read its `dsh.client` from. Fixed by adding an inert root row under the bare package name and giving the root entry `export const name` plus an empty `apply()`. Measured: boot entries 67 → **68**, the panel appears below "规则设定", and switches persist immediately. (2) Three host-log defects fixed: ISO timestamps, both paths plus their existence recorded before spawning, and a 2 MiB rotation that leaves a dated marker instead of wiping the file (which is how weeks of history vanished); the `exit` line gained `pid=` and `entryExists=` so "present at spawn, absent at exit" names an installation replaced underneath a running host. (3) Test pollution of the real log fixed: three spawn-based tests restored `DSH_HOME` in a `finally` while `dispose()` kills children asynchronously, so their synthetic exit lines landed in the operator's real log — now isolated at module scope. **70/70 tests** |
 | **0.2.0** | 2026-10-01 | **Release**: round 20 (persistent browsing history / the "Browser" settings section / synthetic cursor / teardown semantics) and its addendum ship as **0.2.0** — tool count **33 → 34** (new `browser_visited`), plus a new "Browser" section in Settings. Build clean, **70/70 tests pass**, tag `v0.2.0` |
+| Round 21 | 2026-10-01 | **The desktop is now carried by the official sidebar (one page for both parties)**: DSH Desktop is two layers — an Electron shell plus a **Node-mode host** where the plugin runs (no Electron API) — and 0.2 removed `electronViewHost`, leaving no view-carrying channel between host and shell → the plugin borrows a **loopback + token bridge** (installed into the shell's main process by `install.mjs`, idempotent, revertible with `--revert`) that hands it CDP access to the sidebar browser's guest. The result: **the page the agent works on is the page the human sees**, with no self-hosted Electron spawned and no second window. Measurement corrected three things we had assumed: the sidebar guest is created **lazily** (an un-navigated sidebar has no webContents at all); the address-bar route is unreliable (React's controlled input ignores synthetic keyboard events, and focus is taken back by re-renders), so it drives the sidebar's own **"restore last page"** control to force the guest out and then navigates purely over CDP; and the endpoint file must be **rewritten periodically**, or a reader gets the address of an exited shell |
+| Round 22 | 2026-10-01 | **issue #16: an error-reporting path must not be fatal**: `notifyUserActionError` took the host method out and called it **unbound**, so the host's own first statement `void this.ready()` threw a TypeError, and that throw turned into an unhandled rejection inside an async catch → **the whole DSH host exited with 1**; and even with correct binding, `ready()` **throwing synchronously** once disposed escaped every `.catch`. Fixed by calling on the owner and containing every failure along the way, and by making `ready()` return a rejected promise (marked as handled). Four regression tests, including the failing toolbar action driven by the reporter's own `this`-reading stub |
+| Round 23 | 2026-10-01 | **CVE-2026-84961 (undici)**: the CVE is real, but the suggested auto-fix **does nothing in this repository** — `pnpm.overrides` was written into `package.json`, and pnpm 10 no longer reads that field (measured: it prints a warning, ignores it, and the lock still resolved 7.29.0). Pinned `undici: 7.29.1` in **`pnpm-workspace.yaml`** (the new home for it) instead, staying on the same major rather than taking a jump that buys nothing. Impact clarified: the plugin never imports undici, and the published package ships no `node_modules` |
+| Round 24 | 2026-10-01 | **Every last item of the requirements doc**: (1) **the vision strategy finally does something** — under `nonVisual` a coordinate click is **refused with an actionable alternative**, and tool descriptions lead with semantic targeting (the setting was stored, and read by nobody); (2) **non-visual output improved** — snapshots indent by `depth`, coordinates are opt-in (`coords: true`), empty states dropped, and `content(txt)` uses the browser's rendered text; (3) **the sandbox-boundary change stated** (both READMEs plus the settings panel); (4) `closeWithSession` / `autoExpandOnce` **actually work** (the bridge gained `closeSidebarBrowser` and `collapseSidebar`); (5) **each session owns its own sidebar tab**, and a release closes only its own; (6) history gained **keyword and originating-session** filters; (7) the cursor gained an **action bubble**. Six measured bugs fixed along the way (letter-by-letter animated text split into a column of letters, the first call after a restart always failing, three settings that were dead, a release closing somebody else's tab, and every setting silently dropped when the settings file carried a BOM) |
+| Round 25 | 2026-10-01 | **Speed and structure**: measurement put the structural overhead of each command at **49.1 ms** (a fresh TCP connection with the token exchange at 24.8 ms, plus a liveness check before every command at 24 ms) against **0.2 ms** on a reused connection → now **one long-lived connection with serialised requests**, and liveness is settled by "the command failed, so rebuild" instead of being probed up front. The transport moved into its own module, `bridge-connection.ts` (`desktop-bridge-host.ts` 426 → 306 lines). Cursor: an unchanged position is no longer repainted, easing became 190 ms, and `forgetCursor` was added (the cache has to be dropped when the document is replaced, otherwise the pointer never comes back after a navigation) |
+| Round 26 | 2026-10-01 | **Optional system Chrome / Edge**: settings now offer `bundled` / `auto` / `chrome` / `edge`, taking the same approach as Codex Browser Use — launch with `--remote-debugging-port=0`, read the port the browser writes into its own `DevToolsActivePort` file, and drive everything over CDP (through Node 22's built-in `WebSocket`, **zero new dependencies**). **The user's everyday data is never touched** (a separate profile); login state is kept or discarded according to `cookies.persist`. Precedence: explicit choice > desktop sidebar > self-hosting; when the chosen browser is missing, a warning is logged and the bundled one is kept — **never a silent swap** |
+| **0.3.0** | 2026-10-01 | **Release**: rounds 21–26 ship together (the desktop sidebar carrier, the optional installed browser, the whole of requirements doc v2). **99/99 tests pass**, tag `v0.3.0` |
+| Round 27 | 2026-10-01 | **The system browser starts only when it is needed** (reported bug) plus teardown hardening: the entry used to `await launch()` while registering, so **installing the plugin popped a browser up** and even starting DSH dragged one along → construction is now **inert and the browser launches on first need** (concurrent first calls are merged into one startup). Self-review added two more edges: a released host **refuses to start** (otherwise it spawns a process nobody owns), and a release during startup **stops the poll and refuses to publish the client** (otherwise it leaves a dangling connection). Also added `tools/install-web-plugin.mjs`, which turns "change the pin → install → **repair the profile immediately** → verify" into a single command, and the machine username was removed from the CHANGELOG |
+| **0.3.1** | 2026-10-01 | **Release**: round 27 (lazy startup + refusing to start after release) ships as **0.3.1**. **100/100 tests pass**, tag `v0.3.1` |
 
-> The npm badge at the top is the authority on the registry's latest version. (was: `0.1.23` is committed and tagged; if the badge still reads `0.1.22`, that version is not published yet.
+> The npm badge at the top is the authority on the registry's latest version (currently `0.3.1`). After a desktop upgrade, re-run `node desktop-bridge/install.mjs` once; the web side has no such step — see [Updating (the two hosts differ)](#updating-the-two-hosts-differ).
 
 ## Acknowledgements
 
