@@ -46,30 +46,56 @@ export interface DetectedBrowser {
 export declare function detectBrowser(channel: BrowserChannel, env?: NodeJS.ProcessEnv): DetectedBrowser | undefined;
 /** A system browser driven over CDP, presented as a browser view host. */
 export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
-    private readonly child;
-    private readonly client;
-    readonly kind: DetectedBrowser['kind'];
+    private readonly browser;
+    private readonly profileDir;
+    private readonly extraArgs;
     private readonly ephemeralDir?;
     private readonly views;
     private disposed;
     /**
-     * @param child - the launched browser process.
-     * @param client - the CDP connection to it.
-     * @param kind - which product this is (for diagnostics).
-     * @param ephemeralDir - a throwaway profile to remove on release, when the user
-     *   has turned persistence off and no login state should outlive the session.
+     * The browser is started on FIRST USE, never on construction.
+     *
+     * A plugin that launches Chrome the moment its host loads is a plugin that takes
+     * over the machine before anyone asked it to: simply starting DSH would spawn a
+     * browser window. Registration must therefore be inert, and the process is only
+     * spawned when a view is actually needed.
      */
-    private constructor();
+    private client;
+    private child;
+    private starting;
     /**
-     * @param browser - the detected installation to launch.
+     * @param browser - the detected installation to launch on first use.
      * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
      * @param extraArgs - additional Chromium switches.
-     * @param ephemeralDir - a directory to delete when the browser is released, used
-     *   when persistence is switched off so no login state outlives the session.
-     * @returns the host, or undefined when the browser refuses to come up.
+     * @param ephemeralDir - a directory to delete on release, when the user has turned
+     *   persistence off so no login state outlives the session.
      */
-    static launch(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string): Promise<SystemBrowserViewHost | undefined>;
-    /** Whether this host can back views: the CDP connection is live. */
+    constructor(browser: DetectedBrowser, profileDir: string, extraArgs?: readonly string[], ephemeralDir?: string | undefined);
+    /** Which product this host would drive (for diagnostics). */
+    get kind(): DetectedBrowser['kind'];
+    /** Whether the browser has actually been started yet (diagnostics and tests). */
+    get started(): boolean;
+    /**
+     * The CDP client, starting the browser on first use.
+     * @returns the connected client.
+     */
+    private ensureClient;
+    /**
+     * Launch the browser with a private profile and connect over CDP.
+     *
+     * `--remote-debugging-port=0` plus the `DevToolsActivePort` file is the only
+     * reliable way to learn the port: a fixed port collides with whatever else the
+     * machine is running, and parsing stderr is fragile across versions.
+     * @returns the connected client.
+     */
+    private start;
+    /**
+     * Whether this host can back views.
+     *
+     * True while the host is usable — including before the browser has been started,
+     * since the first command is what starts it. Reporting "unavailable" here would
+     * make the plugin fall back for no reason.
+     */
     available(): boolean;
     createView(): ElectronViewHandle;
     destroyView(handle: ElectronViewHandle): void;
@@ -91,7 +117,13 @@ export declare class SystemBrowserViewHost implements ElectronBrowserViewHost {
     onUserAction(): void;
     /** The browser reports its own window lifecycle. */
     onViewClosed(): void;
-    /** Close the browser we launched. The user's own windows are a different process. */
+    /**
+     * Close the browser we launched, if we ever launched one.
+     *
+     * The user's own windows belong to a different process and are never touched. A
+     * host whose browser was never started (the common case when nobody used the
+     * browser) simply tears down its bookkeeping.
+     */
     dispose(): void;
     /** The flattened session for a view, creating its page on first use. */
     private ensureSession;

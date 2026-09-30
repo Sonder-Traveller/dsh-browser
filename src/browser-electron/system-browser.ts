@@ -162,33 +162,65 @@ class CdpClient {
 export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private readonly views = new Map<string, string>()
   private disposed = false
+  /**
+   * The browser is started on FIRST USE, never on construction.
+   *
+   * A plugin that launches Chrome the moment its host loads is a plugin that takes
+   * over the machine before anyone asked it to: simply starting DSH would spawn a
+   * browser window. Registration must therefore be inert, and the process is only
+   * spawned when a view is actually needed.
+   */
+  private client: CdpClient | undefined
+  private child: ChildProcess | undefined
+  private starting: Promise<CdpClient> | undefined
 
   /**
-   * @param child - the launched browser process.
-   * @param client - the CDP connection to it.
-   * @param kind - which product this is (for diagnostics).
-   * @param ephemeralDir - a throwaway profile to remove on release, when the user
-   *   has turned persistence off and no login state should outlive the session.
+   * @param browser - the detected installation to launch on first use.
+   * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
+   * @param extraArgs - additional Chromium switches.
+   * @param ephemeralDir - a directory to delete on release, when the user has turned
+   *   persistence off so no login state outlives the session.
    */
-  private constructor(
-    private readonly child: ChildProcess,
-    private readonly client: CdpClient,
-    readonly kind: DetectedBrowser['kind'],
+  constructor(
+    private readonly browser: DetectedBrowser,
+    private readonly profileDir: string,
+    private readonly extraArgs: readonly string[] = [],
     private readonly ephemeralDir?: string,
   ) {}
 
+  /** Which product this host would drive (for diagnostics). */
+  get kind(): DetectedBrowser['kind'] {
+    return this.browser.kind
+  }
+
+  /** Whether the browser has actually been started yet (diagnostics and tests). */
+  get started(): boolean {
+    return this.child !== undefined
+  }
+
   /**
-   * @param browser - the detected installation to launch.
-   * @param profileDir - a plugin-owned directory; the user's own profile is never touched.
-   * @param extraArgs - additional Chromium switches.
-   * @param ephemeralDir - a directory to delete when the browser is released, used
-   *   when persistence is switched off so no login state outlives the session.
-   * @returns the host, or undefined when the browser refuses to come up.
+   * The CDP client, starting the browser on first use.
+   * @returns the connected client.
    */
-  static async launch(browser: DetectedBrowser, profileDir: string, extraArgs: readonly string[] = [], ephemeralDir?: string): Promise<SystemBrowserViewHost | undefined> {
+  private async ensureClient(): Promise<CdpClient> {
+    if (this.client !== undefined) return this.client
+    // Concurrent first calls share one startup rather than racing two browsers.
+    this.starting ??= this.start().finally(() => { this.starting = undefined })
+    return await this.starting
+  }
+
+  /**
+   * Launch the browser with a private profile and connect over CDP.
+   *
+   * `--remote-debugging-port=0` plus the `DevToolsActivePort` file is the only
+   * reliable way to learn the port: a fixed port collides with whatever else the
+   * machine is running, and parsing stderr is fragile across versions.
+   * @returns the connected client.
+   */
+  private async start(): Promise<CdpClient> {
     const args = [
       '--remote-debugging-port=0',
-      `--user-data-dir=${profileDir}`,
+      `--user-data-dir=${this.profileDir}`,
       // Behave like a fresh, unattended browser: no first-run UI, no default-browser
       // prompt, no restore bubble, and no "Chrome is being controlled" infobar.
       '--no-first-run',
@@ -196,15 +228,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       '--disable-features=Translate,MediaRouter',
       '--disable-session-crashed-bubble',
       '--hide-crash-restore-bubble',
-      ...extraArgs,
+      ...this.extraArgs,
       'about:blank',
     ]
-    const child = spawn(browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
-    const portFile = join(profileDir, 'DevToolsActivePort')
+    const child = spawn(this.browser.path, args, { stdio: ['ignore', 'ignore', 'ignore'], windowsHide: false })
+    this.child = child
+    const portFile = join(this.profileDir, 'DevToolsActivePort')
     const deadline = Date.now() + 30_000
     for (;;) {
-      if (Date.now() > deadline) { child.kill(); return undefined }
-      if (child.exitCode !== null) return undefined
+      if (Date.now() > deadline) { child.kill(); this.child = undefined; break }
+      if (child.exitCode !== null) { this.child = undefined; break }
       if (existsSync(portFile)) {
         try {
           const port = readFileSync(portFile, 'utf8').split('\n')[0]?.trim() ?? ''
@@ -213,7 +246,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
             if (typeof version.webSocketDebuggerUrl === 'string') {
               const client = new CdpClient(version.webSocketDebuggerUrl)
               await client.whenReady()
-              return new SystemBrowserViewHost(child, client, browser.kind, ephemeralDir)
+              this.client = client
+              return client
             }
           }
         } catch {
@@ -222,9 +256,16 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
       }
       await new Promise(resolve => setTimeout(resolve, 250))
     }
+    throw new Error(`dsh-builtin-browser: ${this.browser.kind} did not expose CDP within 30s (${this.browser.path})`)
   }
 
-  /** Whether this host can back views: the CDP connection is live. */
+  /**
+   * Whether this host can back views.
+   *
+   * True while the host is usable — including before the browser has been started,
+   * since the first command is what starts it. Reporting "unavailable" here would
+   * make the plugin fall back for no reason.
+   */
   available(): boolean {
     return !this.disposed
   }
@@ -234,8 +275,9 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     return {
       id: viewId,
       sendCommand: async (method: string, params?: Record<string, unknown>) => {
+        const client = await this.ensureClient()
         const session = this.views.get(viewId) ?? await this.ensureSession(viewId)
-        const result = await this.client.send(method, params, session)
+        const result = await client.send(method, params, session)
         return (result ?? {}) as Record<string, unknown>
       },
     }
@@ -249,7 +291,8 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
     // was attached to, which is why they are tracked separately.
     const targetId = this.sessions.get(session)
     this.sessions.delete(session)
-    if (targetId !== undefined) {
+    // Nothing to close if the browser was never started.
+    if (targetId !== undefined && this.client !== undefined) {
       // Best-effort: a page that is already gone is not an error.
       void this.client.send('Target.closeTarget', { targetId }).catch(() => undefined)
     }
@@ -272,7 +315,7 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
    * window, a locked session) is never worth an error.
    */
   async focus(): Promise<void> {
-    try { this.child.kill('SIGCONT') } catch { /* not supported on Windows; harmless */ }
+    try { this.child?.kill('SIGCONT') } catch { /* not supported on Windows; harmless */ }
   }
 
   /** The browser reports its own window lifecycle. */
@@ -281,19 +324,28 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   /** The browser reports its own window lifecycle. */
   onViewClosed(): void {}
 
-  /** Close the browser we launched. The user's own windows are a different process. */
+  /**
+   * Close the browser we launched, if we ever launched one.
+   *
+   * The user's own windows belong to a different process and are never touched. A
+   * host whose browser was never started (the common case when nobody used the
+   * browser) simply tears down its bookkeeping.
+   */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
     this.views.clear()
     this.sessions.clear()
-    this.client.close()
-    try { this.child.kill() } catch { /* already gone */ }
+    this.client?.close()
+    try { this.child?.kill() } catch { /* already gone */ }
     const ephemeral = this.ephemeralDir
-    if (ephemeral !== undefined) {
+    if (ephemeral !== undefined && this.child !== undefined) {
       // The browser flushes its profile while shutting down, so deleting later avoids
       // racing it. Leftovers are only a stray temp directory, never a live credential.
       setTimeout(() => { try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ } }, 3_000).unref?.()
+    } else if (ephemeral !== undefined) {
+      // Never started, so nothing can be holding it open.
+      try { rmSync(ephemeral, { recursive: true, force: true }) } catch { /* best effort */ }
     }
   }
 
@@ -301,10 +353,11 @@ export class SystemBrowserViewHost implements ElectronBrowserViewHost {
   private async ensureSession(viewId: string): Promise<string> {
     const existing = this.views.get(viewId)
     if (existing !== undefined) return existing
-    const created = await this.client.send('Target.createTarget', { url: 'about:blank' }) as { targetId?: string }
+    const client = await this.ensureClient()
+    const created = await client.send('Target.createTarget', { url: 'about:blank' }) as { targetId?: string }
     const targetId = created?.targetId
     if (typeof targetId !== 'string') throw new Error('dsh-builtin-browser: the browser did not create a page')
-    const attached = await this.client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
+    const attached = await client.send('Target.attachToTarget', { targetId, flatten: true }) as { sessionId?: string }
     const sessionId = attached?.sessionId
     if (typeof sessionId !== 'string') throw new Error('dsh-builtin-browser: the browser did not attach to the new page')
     // The session id is what page commands ride; the target id is what closes it.
