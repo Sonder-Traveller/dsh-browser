@@ -232,7 +232,7 @@ agent (browser_* tools)
 
 - **Seam** (`browser` row): provides the `ctx.browser` service — provider registration, session lifecycle, error codes — decoupled from any implementation.
 - **Provider** (`browser-electron` row): operates views through the `ElectronBrowserViewHost` seam (create/destroy/show, `sendCommand`), implemented with real Electron objects by the shell.
-- **Tools** (`tool-browser` row): the 33 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
+- **Tools** (`tool-browser` row): the 34 model-facing `browser_*` tools, maintaining one browser session per calling task (DSH session).
 
 **Self-hosted mode**: without a desktop shell, the plugin spawns its own Electron child process (`host-main.js`) and drives it over loopback TCP JSON-RPC. The RPC is authenticated with a random per-spawn token delivered over **both stdin and an environment variable** — on Windows the Electron GUI process never receives piped stdin, so the env fallback keeps the handshake reliable. The child auto-restarts after a crash; the plugin prefers its own bundled electron package — packaged app executables (e.g. DSH Desktop.exe) are never reused as the spawnable binary, which would launch the app itself and exit immediately; screenshots prefer Electron's native `capturePage` (CDP capture can hang with multiple views in the window); the Electron lookup order follows below (33.x has a compositor defect; ≥ 40 recommended; the electron 44+ package no longer downloads its binary at install time — if it is missing on first use, the tool errors and tells you to run `npx install-electron` first, needs network).
 
@@ -242,7 +242,7 @@ agent (browser_* tools)
 
 ## Division of labor with the desktop shell
 
-There are three carriers, and the plugin picks one automatically — **no configuration**:
+The plugin picks a carrier automatically, and the setting can override it (four in total):
 
 **① Desktop: drive the official sidebar's page (one page for both parties)**
 
@@ -301,10 +301,10 @@ The settings panel can point the plugin at an **installed Chrome or Edge** (`bro
 
 | Component | Version |
 | --- | --- |
-| DeepSeek Harness (dsh) | `0.1.1-rc.2` (peer range `^0.1.1-rc.2`) |
+| DeepSeek Harness (dsh) | `0.2.0-rc.2` (peer range `>=0.1.1-rc.2 <0.3.0`) |
 | Electron | `44.0.0` (≥ 40 recommended; 33.x has a compositor defect) |
 | Node.js | `22.20.0` |
-| dsh-builtin-browser | `0.1.21` |
+| dsh-builtin-browser | `0.3.0` |
 | OS | Windows 10 (10.0.26200) |
 
 > The plugin declares `electron >= 30`; it has **only been verified on Windows** (macOS/Linux untested, not yet promised).
@@ -403,7 +403,7 @@ Code layout:
 | Round 20 addendum | 2026-10-01 | **Root cause of the invisible settings panel, plus crash diagnostics**: (1) On a real host the panel did not appear — the cause is that all three `cordis.patch.yml` rows were registered under **subpath** names (`dsh-builtin-browser/browser`), while the host's client-module scan resolves a row's specifier to a **package root** (`exactPackageSpecifier` returns `undefined` as soon as it sees a `/`), leaving the package with no row to read its `dsh.client` from. Fixed by adding an inert root row under the bare package name and giving the root entry `export const name` plus an empty `apply()`. Measured: boot entries 67 → **68**, the panel appears below "规则设定", and switches persist immediately. (2) Three host-log defects fixed: ISO timestamps, both paths plus their existence recorded before spawning, and a 2 MiB rotation that leaves a dated marker instead of wiping the file (which is how weeks of history vanished); the `exit` line gained `pid=` and `entryExists=` so "present at spawn, absent at exit" names an installation replaced underneath a running host. (3) Test pollution of the real log fixed: three spawn-based tests restored `DSH_HOME` in a `finally` while `dispose()` kills children asynchronously, so their synthetic exit lines landed in the operator's real log — now isolated at module scope. **70/70 tests** |
 | **0.2.0** | 2026-10-01 | **Release**: round 20 (persistent browsing history / the "Browser" settings section / synthetic cursor / teardown semantics) and its addendum ship as **0.2.0** — tool count **33 → 34** (new `browser_visited`), plus a new "Browser" section in Settings. Build clean, **70/70 tests pass**, tag `v0.2.0` |
 
-> The npm badge at the top is the authority on the registry's latest version: `0.1.23` is committed and tagged; if the badge still reads `0.1.22`, that version is not published yet.
+> The npm badge at the top is the authority on the registry's latest version. (was: `0.1.23` is committed and tagged; if the badge still reads `0.1.22`, that version is not published yet.
 
 ## Acknowledgements
 
