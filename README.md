@@ -26,21 +26,44 @@
 
 `dsh-builtin-browser` 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 提供浏览器能力:
 
-- **真实视图,而非转播**:浏览器是原生 `WebContentsView`,用户直接看到 agent 在做什么,随时可以上手接管;
-- **装好即用**:有桌面外壳时嵌入外壳视图;纯 `dsh web` 也能**自托管**——插件自己拉起一个 Electron 窗口,不需要任何额外配置;
+- **真实页面,而非转播**:页面由**真实的浏览器**承载 —— 桌面端就是官方侧栏里那一个,Web 端是插件拉起的窗口,也可以在设置里改用**你本机的 Chrome / Edge**。用户直接看到 agent 在做什么,随时可以上手接管;
+- **人机同页**(桌面端):agent 操作的页面与人看到的是**同一个**页面 —— 不再是一个你看不见的窗口;
+- **装好即用**:载体自动选择(桌面端侧重侧栏 → 否则自托管),纯 `dsh web` 不需要任何额外配置;
 - **一插件即一套工具**:安装后 agent 自动获得 34 个 `browser_*` 工具(打开、查看、无障碍树、等待、语义/坐标操作、滚动、回退、批量/单控件填表、按键、结构化提取、截图、下载、登录态管理……)。
 
 一句话:**安装插件 = 获得一个与用户共享、可被 agent 驱动的真实浏览器。**
 
 ## 快速开始
 
-```sh
-# 方式一:从 npm 安装(已发布)
-dsh plugin --profile web add dsh-builtin-browser
+插件要装进**你要用的那一端**的 profile 里。两端都装也可以,一份代码两个 profile 各一份。
 
-# 方式二:从源码目录安装(独立仓库,一插件一仓库)
+**Web 端(纯 `dsh web`)**
+
+```sh
+# 从 npm 安装
+dsh plugin --profile web add dsh-builtin-browser
+# 或从源码目录安装(独立仓库,一插件一仓库)
 dsh plugin --profile web add <本仓库路径>
 ```
+
+**桌面端(DSH Desktop)**
+
+```sh
+# 1. 装进桌面端 profile
+dsh plugin --profile desktop add dsh-builtin-browser
+
+# 2. 桌面端特有的一步:让插件能驱动官方侧栏的页面
+node <本仓库路径>/desktop-bridge/install.mjs
+```
+
+> **第 2 步不是可选项,而且每次都要重来一次**:桌面端升级会替换 `resources/app/`,bridge 也随之消失;插件更新后同样需要重装。bridge 不在时插件自动退回"自己开一个独立窗口",功能不中断,只是失去"人机同页"。Web 端**没有**这一步。
+
+**更新**(两端方式不同,详见[更新方式](#更新方式两端不同))
+
+| 端 | 更新步骤 |
+| --- | --- |
+| Web 端 | 更新 profile 里的依赖 → 重启 `dsh web` |
+| 桌面端 | 更新依赖 → **重跑 `node desktop-bridge/install.mjs`** → 重启 DSH Desktop |
 
 安装后,agent 即可使用浏览器工具,例如:
 
@@ -64,13 +87,13 @@ dsh plugin --profile web add <本仓库路径>
     </td>
     <td width="50%" valign="top">
       <h3>DOM 级驱动,框架友好</h3>
-      <p><code>browser_snapshot</code> 返回带编号的交互元素;<code>browser_execute</code> 在页面内执行 JS(受控输入用原生 setter + input/change 事件),React/Vue 页面也能可靠交互。</p>
+      <p><code>browser_snapshot</code> 返回带编号的交互元素;<code>browser_execute</code> 在页面内执行 JS(受控输入用原生 setter + input/change 事件),React/Vue 页面也能可靠交互。<b>语义定位优先</b> —— 不需要图像输入即可完整操作;设置成<b>纯非视觉</b>策略后,依赖截图的坐标点击会被明确拒绝并提示改用语义定位。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>多标签会话</h3>
-      <p>并行打开 URL,查看/切换/关闭/重置标签,每个会话的状态独立保持。</p>
+      <p>并行打开 URL,查看/切换/关闭/重置标签,每个会话的状态独立保持。桌面端下<b>每个会话独占侧栏里自己的一个标签页</b>,结束一个会话不会影响另一个。</p>
     </td>
     <td width="50%" valign="top">
       <h3>多格式内容</h3>
@@ -124,17 +147,17 @@ dsh plugin --profile web add <本仓库路径>
     </td>
     <td width="50%" valign="top">
       <h3>可视化鼠标</h3>
-      <p>agent 操作时在页面内绘制虚拟光标与点击涟漪 —— <b>光标出现即表示它已接管该标签页</b>;DOM 级操作(填值/勾选/选择)同样有落点。可在设置里关闭。</p>
+      <p>agent 操作时在页面内绘制虚拟光标、点击涟漪,并在指针旁用<b>气泡标注当前动作</b> —— <b>光标出现即表示它已接管该标签页</b>;DOM 级操作(填值/勾选/选择)同样有落点。不动真实系统鼠标,可在设置里关闭。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>设置页里的「浏览器」栏</h3>
-      <p>历史与 cookie 是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 开关<b>即时生效</b>,无需重启。</p>
+      <p><b>用哪个浏览器</b>(内置 Electron / 本机 Chrome / 本机 Edge / 自动)、历史与 cookie 是否保留、侧栏是否自动展开、会话结束时是否关闭浏览器、是否显示光标、视觉策略、是否允许读取凭据 —— 开关<b>即时生效</b>,无需重启。</p>
     </td>
     <td width="50%" valign="top">
       <h3>收尾明确</h3>
-      <p><b>关掉浏览器窗口 = 结束该会话</b>(下次打开是干净的新会话),浏览历史与登录状态保留;<b>收起界面只是收起</b>,浏览器继续在后台运行。</p>
+      <p><b>关掉承载页面 = 结束该会话</b>(下次打开是干净的新会话)—— 桌面端是关掉侧栏里那个浏览器标签,Web 端是关掉窗口;浏览历史与登录状态<b>不受影响</b>。<b>收起界面只是收起</b>,浏览器继续运行。会话结束时是否自动释放,由设置项决定。</p>
     </td>
   </tr>
 </table>
@@ -208,11 +231,11 @@ dsh plugin --profile web add <本仓库路径>
 
 ## 配置
 
-插件通过 `cordis.patch.yml` 挂载三行,各行配置:
+插件通过 `cordis.patch.yml` 挂载**四行**:一个**惰性的根行**(只用来声明包名,宿主的客户端插件扫描靠它读到 `dsh.client`,否则设置栏不会出现)+ 三个功能行(`browser` / `browser-electron` / `tool-browser`)。各行配置:
 
 | 行 | 配置项 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `browser-electron` | `viewHost` | 对象 | 必填 | 宿主提供的 `ElectronBrowserViewHost` 实例(通常 `!!js ctx.get('electronViewHost')`) |
+| `browser-electron` | `viewHost` | 对象 | 可选 | 宿主提供的 `ElectronBrowserViewHost` 实例(如 `!!js ctx.get('electronViewHost')`)。**不传时插件自己选载体** —— 桌面端驱动官方侧栏、否则自托管;若在设置里指定了本机 Chrome / Edge,该选择优先于两者 |
 | `browser-electron` | `httpOnly` | 布尔 | `true` | 仅允许 HTTP(S) 导航;其余协议(如 `file:`/`data:`)拒绝(`BROWSER_NAVIGATION_BLOCKED`) |
 | `browser-electron` | `snapshotMaxElements` | 数字 | `60` | 快照最多收录的交互元素数,超出截断 |
 | `browser-electron` | `contentMaxChars` | 数字 | `100000` | 内容抓取默认字符上限 |
@@ -226,12 +249,14 @@ dsh plugin --profile web add <本仓库路径>
 agent (browser_* 工具)
   → ctx.browser (seam, dsh-builtin-browser/browser)
   → dsh-builtin-browser/browser-electron (provider)
-  → ElectronBrowserViewHost (由宿主外壳提供)
-  → WebContentsView + webContents.debugger (CDP)
+  → ElectronBrowserViewHost  ← 同一个接缝,三种载体各实现一份
+      ① 桌面端侧栏      经 bridge → 外壳主进程 → webContents.debugger (CDP)
+      ② 本机 Chrome/Edge 经 WebSocket → CDP
+      ③ 自托管 Electron  经本机 TCP JSON-RPC → 子进程 → CDP
 ```
 
 - **seam 层**(`browser` 行)提供 `ctx.browser` 服务:provider 注册、会话生命周期、错误码,与具体实现解耦;
-- **provider 层**(`browser-electron` 行)通过 `ElectronBrowserViewHost` 接缝操作视图(创建/销毁/显示/`sendCommand`),由真实外壳用 Electron 对象实现;
+- **provider 层**(`browser-electron` 行)只认 `ElectronBrowserViewHost` 这一个接缝(创建/销毁/显示/`sendCommand`),因此**换载体不需要动工具、历史、光标与收尾逻辑**;
 - **工具层**(`tool-browser` 行)提供模型侧的 34 个 `browser_*` 工具,按调用方任务(DSH 会话)维护独立的浏览器会话。
 
 **自托管模式**:没有桌面外壳时,插件自己拉起一个 Electron 子进程(`host-main.js`),通过本机 TCP JSON-RPC 驱动。RPC 带随机 token 认证,token 经 **stdin + 环境变量双通道**传递——Windows 上 Electron 是 GUI 子系统进程、收不到 piped stdin,环境变量兜底保证握手稳定。子进程崩溃会自动重启;优先使用随插件安装的 electron 包(**打包应用如 DSH Desktop.exe 不会被误当作可复用二进制**,避免 spawn 秒退);截图优先走 Electron 原生 `capturePage`(CDP 截图在多视图下会挂起);Electron 的定位顺序见下(33.x 有合成器缺陷,建议 ≥ 40;44+ 的 electron 包不再随安装自动下载二进制,首次使用若缺失会按报错提示先 `npx install-electron`,需联网)。
@@ -292,9 +317,10 @@ node desktop-bridge/install.mjs --revert   # 回滚
 ## 环境要求
 
 - DeepSeek Harness(dsh),已安装对应 profile(`web` / `desktop` 等)
-- **Electron 运行时**(必装依赖,随插件自动安装,建议 ≥ 40;44+ 的二进制不随安装自动下载,缺失时按报错提示先 `npx install-electron`,需网络):
+- **Electron 运行时**(随插件自动安装,建议 ≥ 40;44+ 的二进制不随安装自动下载,缺失时按报错提示先 `npx install-electron`,需网络)—— **只有自托管载体需要它**:
   - `ELECTRON_PATH` 可显式指定其他二进制(最优先);
-  - **DSH Desktop**:打包宿主 exe(`DSH Desktop.exe`)**不复用**——打包应用无法按脚本参数拉起,误用会秒退(issue #6);直接使用随包 electron,开发模式的**裸** Electron 宿主仍可复用;
+  - **桌面端:默认走官方侧栏,不需要 Electron**;退回自托管时使用随包 electron。打包宿主 exe(`DSH Desktop.exe`)**不复用** —— 打包应用无法按脚本参数拉起,误用会秒退(issue #6);开发模式的**裸** Electron 宿主仍可复用;
+  - **改用本机 Chrome / Edge 时也不需要 Electron**;
   - **纯 `dsh web` 自托管**:直接使用随插件安装的 electron 包
 
 ### 验证过的版本
@@ -305,7 +331,7 @@ node desktop-bridge/install.mjs --revert   # 回滚
 | Electron | `44.0.0`(推荐 ≥ 40;33.x 存在合成器缺陷) |
 | Node.js | `22.20.0` |
 | 本机 Chrome / Edge(可选载体) | `154.0.8037.58` / `154.0.4258.37` |
-| dsh-builtin-browser | `0.3.0` |
+| dsh-builtin-browser | `0.3.1` |
 | 操作系统 | Windows 10 (10.0.26200) |
 
 > 插件声明 `electron >= 30`;**当前仅在 Windows 环境实测**(macOS/Linux 未验证,暂不承诺)。
@@ -346,8 +372,8 @@ node desktop-bridge/install.mjs --revert   # 回滚
 - 自托管浏览器的 cookie 在磁盘上以明文存储(Electron 默认行为);需要加密落盘的部署应在宿主层接入系统钥匙串 / DPAPI。
 - `browser_restrict` 是防误操作的**软护栏**,不是安全边界:模型可以自行解除白名单。
 - 页面弹窗(`window.open` / `target=_blank`)不再覆盖当前视图:HTTP(S) 弹窗会在同一会话窗口**新开一个标签页**并计入历史,原页面与 opener 上下文保留;非 HTTP(S) 弹窗(空 URL 弹窗承接、`mailto:`、自定义协议)仍**放行原生窗口**,交给系统处理——这类弹窗不纳入会话模型。
-- `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);仅自托管浏览器可用。
-- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`(2MB 自截断),纯 `dsh web` 自托管可据此自助排查崩溃循环。
+- `browser_auth` 的 cookie 往返不保留 `hostOnly`/`sameSite` 字段(host-only cookie 恢复后变成 domain cookie);**依赖自托管载体** —— 桌面端走侧栏、或改用本机 Chrome/Edge 时该工具会报 `BROWSER_AUTH_UNSUPPORTED`(这两条路径的 Cookie 由浏览器自身管理,不经过插件)。
+- 自托管浏览器子进程崩溃(或宿主 DSH 重启)后会自动重启;崩溃前已打开的会话在**下一次调用时自动重建**——仅页面状态丢失,无需手动 `browser_reset_session`。`browser_reset_session` 仍可用于主动重置。新视图创建前会先有界加载 `about:blank`(保证视图一存在就有可响应的渲染进程),宿主侧命令另有 20s 有界超时;子进程 stderr 与退出码/信号落到 `$DSH_HOME/logs/dsh-builtin-browser-host.log`,超过 2 MiB 时**轮转并保留一行时间戳标记**(不再整体清空 —— 那样会把几周的历史一起抹掉),纯 `dsh web` 自托管可据此自助排查崩溃循环。
 - electron 随插件安装;但 Electron 44+ 不再随安装下载二进制(约 100MB,需网络)——插件探测是纯文件系统、不触发其懒下载,二进制缺失时首次使用会报错并提示先 `npx install-electron`;也可预装 `ELECTRON_PATH` 指定的二进制。
 - 本插件不含浏览器列 UI——那是宿主外壳的配套,别把"浏览器列"当成插件能力。
 
@@ -365,9 +391,11 @@ npm run build
 | 目录 | 职责 |
 | --- | --- |
 | `src/browser/` | `ctx.browser` seam 与全部请求/结果类型 |
-| `src/browser-electron/` | Electron CDP provider、自托管子进程(`host-main.ts`)与 RPC 层 |
+| `src/browser-electron/` | provider 与三种载体实现 —— 桌面侧栏桥(`desktop-bridge-host.ts`)、本机浏览器(`system-browser.ts`)、自托管子进程(`host-main.ts`);传输层 `bridge-connection.ts`;以及设置、历史、虚拟光标 |
 | `src/tool-browser/` | 模型侧 `browser_*` 工具 |
 | `src/types/` | electron 环境类型(shim,避免强制依赖 electron 类型) |
+| `desktop-bridge/` | 装进桌面端的那条 bridge 与幂等安装脚本(`install.mjs`) |
+| `tools/` | 运维脚本(如 `install-web-plugin.mjs`:钉版本 → 安装 → 修复 profile → 复验) |
 
 ## 更新记录
 
@@ -409,8 +437,17 @@ npm run build
 | 第二十轮 | 2026-10-01 | **浏览历史 / 设置栏 / 可视化鼠标 / 收尾语义**:①新增**持久化浏览历史**(`history-store`:追加式 JSONL,落在 cookie 同一 profile 目录;5000 条或 90 天先到者为准;损坏行只丢该行)+ 新工具 **`browser_visited`**(工具数 **33 → 34**),重新打开沿用 `browser_open`;②新增设置页「浏览器」栏(手写客户端 bundle 注册到 `settings.section`,`order: 60` 排在宿主自带栏目下方)+ `GET/PUT /dsh-builtin-browser/settings`(同源防护、64 KiB 上限)+ 设置文档(`settings-store`:字段逐个校验、未知键丢弃、损坏文件按默认值),**开关即时生效**(provider 每次读取,无需重启);③新增页面内**虚拟光标**(内联样式 + Web Animations 以规避页面 `style-src` CSP;`buildTargetScript` 统一附加元素中心 `__point`,于是 click / type / setValue / check / select / clear **都有落点**),**光标出现即代表 agent 已接管该标签页**;④**关掉窗口 = 结束该会话**:窗口 `closed` 时释放其全部视图的 `webContents`(BrowserWindow 不连带销毁子视图,否则每个窗口泄漏一个渲染进程)并上报 `viewClosed`,provider 结束对应会话,seam 新增 `exists()` 供工具层核验会话缓存 —— 下一次调用得到**干净的新会话**,浏览历史与登录状态保留;新增 21 条测试(**68/68 全绿**) |
 | 第二十轮补记 | 2026-10-01 | **客户端设置栏"隐形"的根因 + 崩溃诊断**:①真机验证发现设置栏不出现 —— 根因是 `cordis.patch.yml` 三行全用**子路径名**(`dsh-builtin-browser/browser`)注册,而宿主的客户端模块扫描只接受**精确包名**(`exactPackageSpecifier` 遇 `/` 即返回 `undefined`),于是这个包在客户端侧没有任何行可供读取 `dsh.client`;修复 = 增加一行以**包名**注册的惰性根行 + 给根入口补 `export const name` 与空 `apply()`;实测启动图条目 67 → **68**、设置栏出现并排在「规则设定」下方、开关即时落盘。②宿主日志三处缺陷修复:加 **ISO 时间戳**、spawn 前记录 **两条路径与存在性**、2 MiB 轮转改为**留时间戳标记**(原先整体清空,几周历史就是这样消失的);`exit` 行加 `pid=`/`entryExists=`,使"启动时存在、退出时不存在"自动命名"安装被就地替换"。③修复**测试污染真实日志**:三个 spawn 类测试因 `dispose()` 异步杀子进程,exit 行写在 `finally` 恢复 `DSH_HOME` 之后 → 改为模块级隔离。测试 **70/70** |
 | **0.2.0** | 2026-10-01 | **发布**:第二十轮(浏览历史持久化 / 设置页「浏览器」栏 / 可视化鼠标 / 收尾语义)及其补记随 **0.2.0** 发布 —— 工具数 **33 → 34**(新增 `browser_visited`),设置页新增「浏览器」栏。构建零错误、**70/70 测试全绿**,tag `v0.2.0` |
+| 第二十一轮 | 2026-10-01 | **桌面端改由官方侧栏承载(人机同页)**:DSH Desktop 是"Electron 外壳 + Node 模式宿主"两层,插件跑在宿主里(无 Electron API),而 0.2 移除了 `electronViewHost`、宿主与外壳之间也没有承载视图的通道 → 插件借道一条 **loopback + token 的 bridge**(装在外壳主进程,经 `install.mjs` 幂等安装/可 `--revert`),把侧栏浏览器 guest 的 CDP 交给插件。结果:**agent 操作的页面就是人看到的那个页面**,不再 spawn 自带 Electron、不再多出窗口。过程中被实测纠正三处想当然:侧栏 guest 是**懒创建**的(空地址栏没有 webContents);地址栏那条路不可靠(React 受控输入忽略合成键盘事件、focus 被重渲染夺走),改用侧栏自带的**「恢复页面」**逼出 guest 再纯 CDP 导航;endpoint 文件必须**反复刷新**,否则读者拿到已退出实例的地址 |
+| 第二十二轮 | 2026-10-01 | **issue #16:错误上报路径不得致命**:`notifyUserActionError` 把宿主方法取出后**非绑定调用**,宿主第一句 `void this.ready()` 抛 TypeError,且该异常在 async catch 里变成 unhandled rejection → **整个 DSH 宿主退出 1**;即便绑定正确,`ready()` 在已 dispose 时**同步抛**也逃出 `.catch`。修复 = 在属主上调用 + 全程容错;`ready()` 改为返回 rejected promise(并标记已处理)。回归测试 4 条,含用报告里那个会读 `this` 的 stub 驱动的失败工具栏动作 |
+| 第二十三轮 | 2026-10-01 | **CVE-2026-84961(undici)**:CVE 真实,但收到的自动修复**在本仓库失效** —— `pnpm.overrides` 写在 `package.json` 里,pnpm 10 起已不再读取该字段(实测打印警告并忽略,lock 仍是 7.29.0)。改在 **`pnpm-workspace.yaml`**(新位置)锁 `undici: 7.29.1`,同大版本不做无收益跳跃。影响面已澄清:插件不 import undici,发布物也不含 `node_modules` |
+| 第二十四轮 | 2026-10-01 | **需求表 v2 逐条落地**:①**视觉策略真正接线** —— `nonVisual` 下坐标点击被**明确拒绝并给出可执行替代**、工具描述改为语义优先(此前该设置项存了却无人读取);②**非视觉输出增强** —— 快照按 `depth` 缩进、坐标改按需(`coords: true`)、去空 states,`content(txt)` 改用浏览器渲染文本;③**沙箱边界变化明示**(两份 README + 设置面板);④`closeWithSession` / `autoExpandOnce` 真正生效(bridge 新增 `closeSidebarBrowser`、`collapseSidebar`);⑤**每会话独占一个侧栏标签**,释放只关自己的;⑥历史新增**关键词与来源会话**过滤;⑦光标新增**操作气泡**。顺带修掉 6 个实测 bug(逐字动画文本被拆成一列字母、重启后首次调用必失败、三个设置项是死的、释放会关掉别人的标签、设置文件带 BOM 时全部设置被静默丢弃) |
+| 第二十五轮 | 2026-10-01 | **速度优化 + 结构拆分**:真机量化出每条命令 **49.1ms** 的结构性开销(新建 TCP 连接含 token 往返 24.8ms + 每条命令前的存活检查 24ms),复用连接只需 **0.2ms** → 改为**长连接 + 请求串行**,并把存活判定改为"命令失败才重建"。传输层拆成独立模块 `bridge-connection.ts`(`desktop-bridge-host.ts` 426 → 306 行)。光标：位置未变时不再重绘、缓动改 190ms、新增 `forgetCursor`(文档替换后必须清缓存,否则导航后指针再也不出现) |
+| 第二十六轮 | 2026-10-01 | **可选用本机 Chrome / Edge**:设置里可选 `bundled` / `auto` / `chrome` / `edge`,做法与 Codex Browser Use 一致 —— `--remote-debugging-port=0` 启动、读浏览器自己写下的 `DevToolsActivePort` 取端口、全程走 CDP(用 Node 22 内置 `WebSocket`,**零新增依赖**)。**用户日常数据不被触碰**(独立 profile);登录态按 `cookies.persist` 决定保留或丢弃。优先级:显式选择 > 桌面侧栏 > 自托管;缺失时记警告并继续用内置,**不静默替换** |
+| **0.3.0** | 2026-10-01 | **发布**:第二十一~二十六轮合并发布(桌面端侧栏载体、可选本机浏览器、需求表 v2 全部落地)。**99/99 测试全绿**,tag `v0.3.0` |
+| 第二十七轮 | 2026-10-01 | **系统浏览器只在需要时启动**(上报的 bug)+ 收尾加固:此前 entry 在注册时就 `await launch()`,于是**一装好插件就弹出浏览器**,连"启动 DSH"都会拉起它 → 改为**构造惰性、首次需要页面才启动**(并合并并发启动);自查又补两处边界:释放后的宿主**拒绝启动**(否则会拉起没人管的进程)、启动过程中被释放则**停止轮询并拒绝发布客户端**(否则留下悬空连接)。另新增 `tools/install-web-plugin.mjs` 把"改 pin → install → **立即修复 profile** → 复验"固化为一条命令,并移除 CHANGELOG 里机器用户名 |
+| **0.3.1** | 2026-10-01 | **发布**:第二十七轮(惰性启动 + 释放后拒绝启动)随 **0.3.1** 发布。**100/100 测试全绿**,tag `v0.3.1` |
 
-> registry 上的最新版本以顶部 npm 徽章为准:本次 `0.1.23` 已入库并打 tag;若徽章仍显示 `0.1.22`,说明该版本尚未 publish。
+> registry 上的最新版本以顶部 npm 徽章为准(当前 `0.3.1`)。桌面端升级后需重跑一次 `node desktop-bridge/install.mjs`;Web 端无此步骤 —— 详见[更新方式](#更新方式两端不同)。
 
 ## 特别感谢
 

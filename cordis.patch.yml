@@ -8,13 +8,19 @@
 # though every tool works — hence the inert root row under the bare package name.
 #
 # The browser seam (ctx.browser) is always mounted, and the Electron provider plus
-# the browser_* tools are always registered: when a host provides an embedded view
-# seam the provider drives that view, and otherwise it self-hosts its own Electron
-# window, so installing the plugin is enough for the browser to work anywhere.
-# DSH 0.2 no longer provides `electronViewHost` (the desktop shell's embedded
-# view), so `ctx.get('electronViewHost')` currently resolves to undefined and
-# every surface self-hosts. The row keeps reading it on purpose: a host that
-# reintroduces such a seam is then picked up without a code change.
+# the browser_* tools are always registered. The CARRIER is chosen at run time:
+#
+#   1. a browser the user selected in settings (their installed Chrome / Edge),
+#      launched with a plugin-owned profile;
+#   2. the desktop shell's sidebar, driven over its loopback bridge — the agent
+#      then works on the same page the human is looking at;
+#   3. a self-hosted Electron window, which is what every surface without either
+#      of the above gets; installing the plugin is enough for the browser to work.
+#
+# DSH 0.2 no longer provides `electronViewHost` (the desktop shell's embedded view),
+# so the row below resolves to undefined on current hosts. It keeps reading the
+# seam on purpose: a host that reintroduces one is then picked up without a code
+# change, and an explicit `viewHost` always outranks the automatic choice.
 - insert:
     # Root row. The host's client-module scan resolves a loader row's specifier
     # to a PACKAGE ROOT; a row named after a subpath is skipped, and this package
