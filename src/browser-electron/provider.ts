@@ -13,7 +13,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { HistoryStore, type VisitedPage } from './history-store.js'
 import type { BrowserSettings } from './settings-store.js'
-import { paintCursor, type CursorAction } from './virtual-cursor.js'
+import { forgetCursor, paintCursor, type CursorAction } from './virtual-cursor.js'
 import type {
   BrowserA11yRequest,
   BrowserA11yResult,
@@ -185,6 +185,31 @@ export interface ElectronBrowserViewHost {
    * @param handler - called with the group (session) key; must not throw.
    */
   onViewClosed?(handler: (windowId: string) => void): void
+  /**
+   * Release the service's page(s) without ending the plugin's own lifetime.
+   *
+   * Only carriers that outlive a browser session need this. A self-hosted window
+   * dies with its view, but the desktop shell's sidebar keeps running no matter
+   * what the plugin does — so "release the browser when the session ends"
+   * (settings: ui.closeWithSession) has to be asked for explicitly there.
+   * @returns a promise that settles once the release was attempted.
+   */
+  releasePage?(): Promise<void>
+  /**
+   * Fold the carrier's presentation away while keeping the page alive.
+   *
+   * The desktop sidebar keeps running regardless of the plugin, so "do not take
+   * over the screen" (settings: ui.autoExpandOnce = false) can only be honoured by
+   * asking the shell to fold it. A self-hosted window has no such state and simply
+   * does not implement this.
+   * @returns a promise that settles once the fold was attempted.
+   */
+  collapse?(): Promise<void>
+  /**
+   * Release everything the carrier owns (a spawned browser, a socket, a child).
+   * Called when the plugin stops using it, never while it is still in service.
+   */
+  dispose?(): void
 }
 
 /**
@@ -670,6 +695,11 @@ export class ElectronBrowserProvider implements BrowserProvider {
   private async settleDocument(handle: ElectronViewHandle, before: string, signal?: AbortSignal): Promise<void> {
     const started = Date.now()
     const deadline = started + SETTLE_TIMEOUT_MS
+    // The document is being replaced, so the synthetic pointer drawn into the old one
+    // is gone. Dropping the remembered position is what lets it be painted again:
+    // without this, a paint at coincidentally identical coordinates would be skipped
+    // and the pointer would never come back after a navigation.
+    forgetCursor(handle)
     for (;;) {
       if (signal?.aborted === true) return
       // A probe failure is expected while the navigation commits (the context is
@@ -1180,21 +1210,39 @@ export class ElectronBrowserProvider implements BrowserProvider {
       // iframes stay opaque — the browser forbids reading them).
       let content = ''
       if (fmt === 'txt') {
-        const parts = []
-        const textWalk = (node) => {
-          if (node.nodeType === Node.TEXT_NODE) { const t = (node.textContent || '').trim(); if (t) parts.push(t); return }
-          if (node.nodeType !== Node.ELEMENT_NODE) return
-          const tag = node.tagName.toLowerCase()
-          if (tag === 'script' || tag === 'style' || tag === 'noscript') return
-          if (tag === 'iframe') {
-            try { const d = node.contentDocument; if (d && d.body) for (const c of d.body.childNodes) textWalk(c) } catch { /* cross-origin */ }
-            return
+        // Prefer the browser's own rendered text.
+        //
+        // Walking text nodes and joining them is not equivalent: pages that wrap
+        // every character in its own element — one-character spans for a
+        // per-character animation, which is common — produce one text node per
+        // letter, and joining those with spaces turns every word into a column of
+        // letters. The rendered text reassembles them the way a reader sees them,
+        // and it also honours visibility, so hidden text does not leak out.
+        // (No backticks in this comment: it lives inside a template literal.)
+        const rendered = typeof root.innerText === 'string' ? root.innerText : ''
+        if (rendered.trim() !== '') {
+          content = rendered
+        } else {
+          // Fallback for nodes without layout (a detached root, or a fragment):
+          // collect text directly, still piercing shadow roots and same-origin
+          // iframes, and join without inventing separators beyond what the markup
+          // already implies.
+          const parts = []
+          const textWalk = (node) => {
+            if (node.nodeType === Node.TEXT_NODE) { const t = (node.textContent || '').trim(); if (t) parts.push(t); return }
+            if (node.nodeType !== Node.ELEMENT_NODE) return
+            const tag = node.tagName.toLowerCase()
+            if (tag === 'script' || tag === 'style' || tag === 'noscript') return
+            if (tag === 'iframe') {
+              try { const d = node.contentDocument; if (d && d.body) for (const c of d.body.childNodes) textWalk(c) } catch { /* cross-origin */ }
+              return
+            }
+            if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) textWalk(c)
+            for (const child of node.childNodes) textWalk(child)
           }
-          if (node.shadowRoot) for (const c of node.shadowRoot.childNodes) textWalk(c)
-          for (const child of node.childNodes) textWalk(child)
+          textWalk(root)
+          content = parts.join(' ')
         }
-        textWalk(root)
-        content = parts.join(' ')
       }
       else if (fmt === 'html') content = root.outerHTML || ''
       else if (fmt === 'json') content = JSON.stringify(root)
@@ -1270,6 +1318,18 @@ export class ElectronBrowserProvider implements BrowserProvider {
       x = Number(out.x)
       y = Number(out.y)
     } else {
+      // A coordinate only exists because somebody read a picture. Under the
+      // non-visual strategy the plugin must not accept one: a model that cannot
+      // see cannot have produced it, so the coordinates are either copied from an
+      // earlier vision pass or invented, and honouring them turns a silent
+      // mis-click into a mystery. Refusing here, with a message that says what to
+      // do instead, converts that into a usable instruction.
+      if (this.settingsSource !== undefined && this.settingsSource().vision.strategy === 'nonVisual') {
+        throw new BrowserError(
+          'browser: the configured non-visual strategy refuses coordinate clicks — pass a semantic target instead, e.g. target { by: "text", value: "Sign in" }, which locates the element from the DOM and clicks its centre',
+          'BROWSER_NON_VISUAL_COORDINATES',
+        )
+      }
       x = request.x
       y = request.y
     }
@@ -1298,7 +1358,9 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
     // Paint before the press so the ripple is already on screen when the click
     // lands — the cursor exists to show the human WHERE the agent acts.
-    this.showCursor(handle, x, y, 'click')
+    // Name the operation in the overlay: the pointer is the "agent is driving this
+    // tab" signal, so the bubble is what lets a human follow along without the log.
+    this.showCursor(handle, x, y, 'click', 'click', true)
     const release = (): void => {
       void handle
         .sendCommand('Input.dispatchMouseEvent', {
@@ -1351,7 +1413,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
       const locateTab = this.activeTab(s)
       const out = await this.runTargetScript(locateTab, script, locateMs, signal, 'BROWSER_TYPE_FAILED', 'browser: type')
       const cursorPoint = scriptPoint(out)
-      if (cursorPoint !== undefined) this.showCursor(locateTab.handle, cursorPoint.x, cursorPoint.y, 'click')
+      if (cursorPoint !== undefined) this.showCursor(locateTab.handle, cursorPoint.x, cursorPoint.y, 'click', 'type', true)
     }
     const text = 'text' in request ? request.text : ''
     const timeoutMs = 30_000
@@ -2274,7 +2336,7 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @param options - result cap and an optional hostname filter.
    * @returns the matching visits, or an empty list when history is disabled.
    */
-  visited(options: { readonly limit?: number; readonly domain?: string } = {}): readonly VisitedPage[] {
+  visited(options: { readonly limit?: number; readonly domain?: string; readonly query?: string; readonly session?: string } = {}): readonly VisitedPage[] {
     return this.historyStore?.list(options) ?? []
   }
 
@@ -2287,10 +2349,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
    * @param x - viewport x in CSS pixels.
    * @param y - viewport y in CSS pixels.
    * @param action - click pulses a ripple; move only relocates.
+   * @param label - short description of the operation, shown beside the pointer.
+   * @param force - paint even when the pointer is already there (a click ripple must
+   *   always play; a bare move need not repeat).
    */
-  private showCursor(handle: ElectronViewHandle, x: number, y: number, action: CursorAction): void {
+  private showCursor(handle: ElectronViewHandle, x: number, y: number, action: CursorAction, label?: string, force = false): void {
     if (this.settingsSource !== undefined && !this.settingsSource().ui.virtualCursor) return
-    paintCursor(handle, x, y, action, (target, expression) => handleSendEvaluate(target, expression))
+    paintCursor(handle, x, y, action, (target, expression) => handleSendEvaluate(target, expression), label, force)
   }
 
   /**
@@ -2370,6 +2435,13 @@ export class ElectronBrowserProvider implements BrowserProvider {
     if (existing !== undefined) {
       this.sessions.delete(session)
       for (const tab of existing.tabs) this.host.destroyView(tab.handle)
+      // Releasing the browser at session end is a setting, not fixed behaviour
+      // (requirements §3). A self-hosted carrier already tore its window down with
+      // the views above; the desktop's sidebar does not, so it is asked explicitly
+      // — and its cookies plus the browsing history outlive the page either way.
+      if (this.settingsSource !== undefined && this.settingsSource().ui.closeWithSession) {
+        void this.host.releasePage?.().catch(() => undefined)
+      }
     }
     return Promise.resolve()
   }
@@ -2481,19 +2553,46 @@ export class ElectronBrowserProvider implements BrowserProvider {
     }
   }
 
-  /** Report a failed user action to the host UI (toolbar), when supported. */
+  /**
+   * Report a failed user action to the host UI (toolbar), when supported.
+   *
+   * Two properties matter here, because this runs inside the catch of an async
+   * handler (issue #16):
+   *  - the receiver must be preserved. Reading the method off the host and calling
+   *    it unbound runs the host's implementation with `this === undefined`, so its
+   *    very first statement (`void this.ready()`) throws, the throw escapes the
+   *    async catch as an unhandled rejection, and the whole DSH host exits;
+   *  - this method must be incapable of throwing. Reporting a failed action is
+   *    diagnostics: it can never be allowed to become the failure.
+   */
   private notifyUserActionError(action: BrowserUserAction, error: unknown): void {
-    const notify = (this.host as { notifyUserActionError?(windowId: string, message: string): void }).notifyUserActionError
     const message = `action ${action.type} failed: ${String(error)}`
-    if (typeof notify === 'function') {
-      notify(action.windowId, message)
-    } else {
-      process.stderr.write(`[dsh-browser] user action failed: ${message}\n`)
+    let reported = false
+    try {
+      const host = this.host as { notifyUserActionError?(windowId: string, message: string): void }
+      const notify = host.notifyUserActionError
+      if (typeof notify === 'function') {
+        // Called on its owner: an unbound call here kills the host process.
+        notify.call(host, action.windowId, message)
+        reported = true
+      }
+    } catch (notifyError) {
+      // Contained on purpose; the log line below still carries the original cause.
+      process.stderr.write(`[dsh-browser] host notify failed: ${String(notifyError)}\n`)
     }
+    if (!reported) process.stderr.write(`[dsh-browser] user action failed: ${message}\n`)
   }
 
   /** Ask the host to show the active tab's view, carrying the session label. */
   private showActive(s: Session): void {
+    // §3: whether the agent's page takes over the screen is the user's choice, not
+    // a fixed behaviour. With auto-expand off the page still exists and is still
+    // driven — it is simply folded away, so the agent works without claiming the
+    // sidebar. Carriers that own no presentation (self-hosted) ignore the call.
+    if (this.settingsSource !== undefined && !this.settingsSource().ui.autoExpandOnce) {
+      void this.host.collapse?.().catch(() => undefined)
+      return
+    }
     this.host.showView?.(this.activeTab(s).handle, s.label)
   }
 

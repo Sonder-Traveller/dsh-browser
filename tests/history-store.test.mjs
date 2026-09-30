@@ -165,3 +165,23 @@ test('history can be switched off entirely, and the browser keeps working', asyn
   assert.deepEqual(p.visited(), [], 'nothing recorded while disabled')
   await p.close(sid)
 })
+
+// Requirements §5: the history has to be searchable, and a visit has to say which
+// session made it — "the pages THIS task opened" is what makes a shared history
+// usable when several sessions and a human all browse through one browser.
+test('the history filters by keyword and by the session that visited', () => {
+  const file = historyFile()
+  const store = new HistoryStore(file)
+  const now = Date.now()
+
+  store.append({ at: now - 3_000, url: 'https://docs.example.com/start', title: 'Getting started', session: 'task-a' })
+  store.append({ at: now - 2_000, url: 'https://news.example.com/world', title: 'World news', session: 'task-b' })
+  store.append({ at: now - 1_000, url: 'https://shop.other.test/cart', title: 'Getting paid', session: 'task-a' })
+
+  assert.equal(store.list({ session: 'task-a' }).length, 2, 'filtered by session')
+  assert.equal(store.list({ query: 'getting' }).length, 2, 'keyword matches the title, case-insensitively')
+  assert.equal(store.list({ query: 'docs.example' }).length, 1, 'keyword matches the URL too')
+  assert.equal(store.list({ session: 'task-a', query: 'getting' }).length, 2, 'filters compose')
+  assert.equal(store.list({ query: 'nothing-here' }).length, 0, 'a miss returns nothing')
+  assert.equal(store.list({ session: 'task-a' })[0].url, 'https://shop.other.test/cart', 'newest first')
+})

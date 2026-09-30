@@ -35,6 +35,7 @@
     "lib",
     "src",
     "docs",
+    "desktop-bridge",
     "client.js",
     "cordis.patch.yml",
     "README.md",

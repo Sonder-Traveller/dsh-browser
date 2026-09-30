@@ -87,6 +87,31 @@ export interface ElectronBrowserViewHost {
      * @param handler - called with the group (session) key; must not throw.
      */
     onViewClosed?(handler: (windowId: string) => void): void;
+    /**
+     * Release the service's page(s) without ending the plugin's own lifetime.
+     *
+     * Only carriers that outlive a browser session need this. A self-hosted window
+     * dies with its view, but the desktop shell's sidebar keeps running no matter
+     * what the plugin does — so "release the browser when the session ends"
+     * (settings: ui.closeWithSession) has to be asked for explicitly there.
+     * @returns a promise that settles once the release was attempted.
+     */
+    releasePage?(): Promise<void>;
+    /**
+     * Fold the carrier's presentation away while keeping the page alive.
+     *
+     * The desktop sidebar keeps running regardless of the plugin, so "do not take
+     * over the screen" (settings: ui.autoExpandOnce = false) can only be honoured by
+     * asking the shell to fold it. A self-hosted window has no such state and simply
+     * does not implement this.
+     * @returns a promise that settles once the fold was attempted.
+     */
+    collapse?(): Promise<void>;
+    /**
+     * Release everything the carrier owns (a spawned browser, a socket, a child).
+     * Called when the plugin stops using it, never while it is still in service.
+     */
+    dispose?(): void;
 }
 /**
  * A user-initiated browser action from the host's own UI (toolbar). The
@@ -501,6 +526,8 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
     visited(options?: {
         readonly limit?: number;
         readonly domain?: string;
+        readonly query?: string;
+        readonly session?: string;
     }): readonly VisitedPage[];
     /**
      * Show the synthetic pointer on a view, unless the user switched it off. The
@@ -511,6 +538,9 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      * @param x - viewport x in CSS pixels.
      * @param y - viewport y in CSS pixels.
      * @param action - click pulses a ripple; move only relocates.
+     * @param label - short description of the operation, shown beside the pointer.
+     * @param force - paint even when the pointer is already there (a click ripple must
+     *   always play; a bare move need not repeat).
      */
     private showCursor;
     /**
@@ -552,7 +582,18 @@ export declare class ElectronBrowserProvider implements BrowserProvider {
      * is reported to the host (toolbar) when the host supports it, else logged.
      */
     private handleUserAction;
-    /** Report a failed user action to the host UI (toolbar), when supported. */
+    /**
+     * Report a failed user action to the host UI (toolbar), when supported.
+     *
+     * Two properties matter here, because this runs inside the catch of an async
+     * handler (issue #16):
+     *  - the receiver must be preserved. Reading the method off the host and calling
+     *    it unbound runs the host's implementation with `this === undefined`, so its
+     *    very first statement (`void this.ready()`) throws, the throw escapes the
+     *    async catch as an unhandled rejection, and the whole DSH host exits;
+     *  - this method must be incapable of throwing. Reporting a failed action is
+     *    diagnostics: it can never be allowed to become the failure.
+     */
     private notifyUserActionError;
     /** Ask the host to show the active tab's view, carrying the session label. */
     private showActive;

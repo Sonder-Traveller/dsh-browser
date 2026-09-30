@@ -1,0 +1,305 @@
+/**
+ * Desktop-sidebar browser host: drive the page the desktop shell shows in its
+ * sidebar, instead of spawning a second, parallel Electron window.
+ *
+ * WHY
+ * The plugin runs inside the desktop's Node-mode host, where there is no Electron
+ * API — which is why it self-hosts a whole browser today. The shell, however, can
+ * own views, and its sidebar already displays real web pages. This host borrows
+ * that page over the shell's bridge (see apps/desktop/bridge/plugin-browser-bridge.js),
+ * so the agent and the human end up on ONE page instead of two.
+ *
+ * CONTRACT
+ * It implements the same `ElectronBrowserViewHost` seam the self-hosted host does,
+ * so the provider, the tools, browsing history, the synthetic cursor and the
+ * teardown rules are all unchanged: only the carrier differs. Everything is
+ * lazily materialized — a fresh shell has no sidebar guest until something asks
+ * for a page, and the bridge creates one on demand.
+ *
+ * FALLBACK
+ * `discover()` returns undefined whenever the shell offers no usable bridge
+ * (older desktop build, plain `dsh web`, bridge not started), and the entry point
+ * then keeps the self-hosted Electron it has always used.
+ * @module dsh-browser/browser-electron/desktop-bridge-host
+ */
+
+import { BridgeConnection, type BridgeEndpoint } from './bridge-connection.js'
+import { readFileSync } from 'node:fs'
+import { connect, type Socket } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js'
+import type { BrowserUserAction } from './provider.js'
+
+
+/** Absolute path of the endpoint file the shell writes. */
+export function bridgeEndpointPath(): string {
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  return join(home, 'dsh-builtin-browser-bridge.json')
+}
+
+/**
+ * Whether a command failed because the page is no longer there (as opposed to
+ * failing on its own merits). Only these are worth retrying on a fresh guest.
+ * @param error - the failure to classify.
+ */
+function isGuestGone(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /guest \d+ is not available|sidebar unavailable|did not create a browser guest/i.test(message)
+}
+
+/**
+ * The desktop sidebar, presented as a browser view host.
+ *
+ * One sidebar exists per shell window, so every view this host hands out refers
+ * to the same guest: the provider keeps its tab bookkeeping, and the tabs simply
+ * share the visible page. That is the intended behaviour for this carrier — the
+ * point is a single page both parties can see.
+ */
+export class DesktopBridgeViewHost implements ElectronBrowserViewHost {
+  private readonly connection: BridgeConnection
+  private readonly views = new Map<string, number>()
+  /**
+   * Guests whose view is gone but whose page may still be open in the sidebar.
+   *
+   * The provider destroys its view handles before it asks for a release, so the
+   * mapping is dropped by then — keeping the guest ids here is what lets us close
+   * only our own tabs when several sessions are running (requirements §4: each
+   * session gets its own page).
+   */
+  private readonly orphaned = new Set<number>()
+  private userActionHandler: ((action: BrowserUserAction) => void) | undefined
+
+  /**
+   * @param endpoint - the shell's published bridge endpoint.
+   */
+  private constructor(private readonly endpoint: BridgeEndpoint) {
+    this.connection = new BridgeConnection(endpoint)
+  }
+
+  /**
+   * Find a usable desktop bridge, if this surface has one.
+   *
+   * A stale endpoint (a shell that already exited, leaving its file behind) is
+   * rejected here rather than surfacing later as a mysterious ECONNREFUSED: the
+   * caller falls back to self-hosting, which always works.
+   * @returns the host, or undefined when no bridge is available.
+   */
+  static async discover(): Promise<DesktopBridgeViewHost | undefined> {
+    let endpoint: BridgeEndpoint
+    try {
+      const raw = JSON.parse(readFileSync(bridgeEndpointPath(), 'utf8')) as Partial<BridgeEndpoint>
+      if (typeof raw.port !== 'number' || typeof raw.token !== 'string' || typeof raw.pid !== 'number') return undefined
+      endpoint = { port: raw.port, token: raw.token, pid: raw.pid, ...raw.updatedAt !== undefined ? { updatedAt: raw.updatedAt } : {} }
+    } catch {
+      return undefined
+    }
+    try {
+      // A throwaway connection for discovery: the adopted host opens its own, and a
+      // rejected endpoint must not leave a socket behind.
+      const probe = new BridgeConnection(endpoint)
+      try {
+        const answer = await probe.call({ op: 'list' }, 5_000)
+        return answer.ok === true ? new DesktopBridgeViewHost(endpoint) : undefined
+      } finally {
+        probe.close()
+      }
+    } catch {
+      // Dead endpoint or an older bridge: self-hosting remains the answer.
+      return undefined
+    }
+  }
+
+  /** Whether this host can back views: the bridge already answered `list`. */
+  available(): boolean {
+    return true
+  }
+
+  /**
+   * The guest id backing a view, materialized on first use.
+   *
+   * The sidebar browser is itself a multi-tab surface, so each view gets its own
+   * tab's guest: the provider's tab bookkeeping then maps onto real tabs the human
+   * can see and switch between. Two rules keep that honest:
+   *   - a cached guest is used as-is: probing it first cost a round-trip on every
+   *     command, so liveness is established by the command failing instead;
+   *   - a fresh view takes an unclaimed guest, growing the tab strip only when
+   *     every existing guest is already spoken for.
+   * @param viewId - the view whose guest is wanted.
+   * @param url - address to use when a sidebar browser has to be opened first.
+   */
+  private async guestFor(viewId: string, url?: string): Promise<number> {
+    const existing = this.views.get(viewId)
+    // No liveness check here: verifying the cached guest cost a round-trip on every
+    // command. A guest that has gone away is detected by the command itself failing,
+    // and `createView`'s sendCommand then discards the cache and calls back in here.
+    if (existing !== undefined) return existing
+
+    // The browser tab must exist before its strip can be extended: `ensureSidebar`
+    // opens the sidebar (and, on a fresh shell, materializes the first guest).
+    const sidebar = await this.connection.call({
+      op: 'ensureSidebar',
+      ...url !== undefined ? { url } : {},
+    })
+    if (sidebar.ok !== true) throw new Error(`dsh-builtin-browser: sidebar unavailable (${String(sidebar.error)})`)
+
+    const wanted = this.views.size + 1
+    let ids = await this.guestIds(Math.max(1, wanted))
+    const taken = new Set(this.views.values())
+    let free = ids.find(id => !taken.has(id))
+    if (free === undefined) {
+      // Every tab is already driving something: the strip has to grow.
+      ids = await this.guestIds(ids.length + 1)
+      free = ids.find(id => !taken.has(id))
+    }
+    if (free === undefined) throw new Error('dsh-builtin-browser: the sidebar reported no free browser tab')
+    this.views.set(viewId, free)
+    return free
+  }
+
+  /**
+   * Ask for at least `count` sidebar tabs and return their guest ids.
+   * @param count - minimum number of tabs.
+   */
+  private async guestIds(count: number): Promise<number[]> {
+    const answer = await this.connection.call({ op: 'ensureTabs', count })
+    if (answer.ok !== true) throw new Error(`dsh-builtin-browser: could not open a sidebar tab (${String(answer.error)})`)
+    const ids = Array.isArray(answer.ids) ? answer.ids.map(Number).filter(Number.isFinite) : []
+    if (ids.length === 0) throw new Error('dsh-builtin-browser: the sidebar reported no browser tabs')
+    return ids
+  }
+
+  createView(): ElectronViewHandle {
+    const viewId = randomUUID()
+    const navigateUrl = (method: string, params?: Record<string, unknown>): string | undefined =>
+      method === 'Page.navigate' ? String((params as { url?: unknown })?.url ?? '') : undefined
+    const run = async (guest: number, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const answer = await this.connection.call({ op: 'cdp', id: guest, method, params })
+      if (answer.ok !== true) throw new Error(`dsh-builtin-browser: sidebar command failed: ${String(answer.error)}`)
+      // The bridge forwards whatever CDP answered; the seam expects an object.
+      return (answer.result ?? {}) as Record<string, unknown>
+    }
+    return {
+      id: viewId,
+      sendCommand: async (method: string, params?: Record<string, unknown>) => {
+        // No liveness probe up front. Checking first cost a whole round-trip on
+        // every command; instead the command runs and its failure is what triggers
+        // recovery. Only a genuinely missing guest is retried, so a real error (a
+        // bad selector, a timeout) still surfaces unchanged.
+        const url = navigateUrl(method, params)
+        let guest = await this.guestFor(viewId, url)
+        try {
+          return await run(guest, method, params)
+        } catch (error) {
+          if (!isGuestGone(error)) throw error
+          // The human closed the tab: the page is gone, so take a fresh one and
+          // replay the command once. This is the "closing the interface ends the
+          // session" rule, now paid for only when it actually happens.
+          this.views.delete(viewId)
+          guest = await this.guestFor(viewId, url)
+          return await run(guest, method, params)
+        }
+      },
+    }
+  }
+
+  destroyView(handle: ElectronViewHandle): void {
+    const guest = this.views.get(handle.id)
+    if (guest !== undefined) {
+      // Remember it: the page outlives our handle, and a later release must be able
+      // to name exactly the tabs this plugin opened.
+      this.orphaned.add(guest)
+      this.views.delete(handle.id)
+    }
+  }
+
+  /**
+   * Nothing to show: the sidebar is already on screen, and showing it again is
+   * the shell's business (it owns the tab strip and the visibility toggle).
+   */
+  showView(): void {}
+
+  /** Same as {@link showView}: the page is already presented by the shell. */
+  async presentView(): Promise<void> {}
+
+  /**
+   * The shell owns window grouping, and one sidebar serves every view, so there
+   * is nothing to record here. (It must not write a placeholder guest id either:
+   * a view whose guest is not yet materialized has to stay absent from the map,
+   * or the first real command would be sent to the placeholder.)
+   */
+  groupView(): void {}
+
+  /** Focus is the shell's to manage, and there is no separate window to raise. */
+  async focus(): Promise<void> {}
+
+  onUserAction(handler: (action: BrowserUserAction) => void): void {
+    this.userActionHandler = handler
+  }
+
+  /** The shell reports its own window lifecycle; nothing to subscribe to here. */
+  onViewClosed(): void {}
+
+  /**
+   * Release the sidebar's browser pages (requirements §3, `ui.closeWithSession`).
+   *
+   * Destroying our own view handles is not enough on this carrier: the sidebar
+   * belongs to the shell and would happily keep the page (and its renderer) alive.
+   * Closing the tabs is what actually ends the page — and only the page: cookies
+   * live in the partition, history on disk, so both survive.
+   * @returns a promise that settles once the shell has been asked.
+   */
+  async releasePage(): Promise<void> {
+    // Only our own tabs: the ids come from the views we handed out (and their
+    // orphans), never from "every webview currently visible". With two sessions
+    // live, releasing one must leave the other's page alone.
+    const mine = [...this.views.values(), ...this.orphaned]
+    this.views.clear()
+    this.orphaned.clear()
+    // Nothing of ours is open: release nothing. Falling through to an unfiltered
+    // release here would close tabs a human opened, or another session's page.
+    if (mine.length === 0) return
+    let titles: string[]
+    try {
+      const answer = await this.connection.call({ op: 'list' }, 5_000)
+      const sidebar = Array.isArray(answer.sidebar) ? answer.sidebar as Array<{ id?: unknown; title?: unknown }> : []
+      titles = sidebar
+        .filter(guest => mine.includes(Number(guest.id)))
+        .map(guest => String(guest.title ?? ''))
+        .filter(title => title !== '')
+    } catch {
+      // Could not read the titles back; releasing nothing is safer than closing
+      // tabs that belong to somebody else.
+      return
+    }
+    if (titles.length === 0) return
+    try {
+      await this.connection.call({ op: 'closeSidebarBrowser', titles }, 10_000)
+    } catch {
+      // Best effort: the setting expresses a preference, and a shell that cannot
+      // be reached is no reason to fail the session teardown that called us.
+    }
+  }
+
+  /**
+   * Fold the sidebar away without ending the page (`ui.autoExpandOnce` is off, or
+   * the caller wants the screen back while work continues).
+   * @returns a promise that settles once the shell has been asked.
+   */
+  async collapse(): Promise<void> {
+    try {
+      await this.connection.call({ op: 'collapseSidebar' }, 10_000)
+    } catch {
+      // Presentation only; failing to fold is never worth an error.
+    }
+  }
+
+  /** No child process of our own to stop; close the shared connection instead. */
+  dispose(): void {
+    this.connection.close()
+    this.views.clear()
+    this.orphaned.clear()
+    this.userActionHandler = undefined
+  }
+}

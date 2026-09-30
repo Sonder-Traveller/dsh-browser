@@ -121,3 +121,18 @@ test('the provider honours a settings switch flipped at runtime', async () => {
   assert.ok(readHistory(history).includes('/one'), 'earlier records were kept')
   await p.close(sid)
 })
+
+// A hand-edited settings file has to survive the editor. Notepad and PowerShell's
+// `Set-Content -Encoding utf8` both write a leading BOM, and JSON.parse rejects it —
+// so without a strip the document looked correct while every value in it was silently
+// discarded and the plugin ran on defaults (including switches just turned off).
+test('a settings file written with a UTF-8 BOM is still honoured', () => {
+  const file = settingsFile()
+  const document = { vision: { strategy: 'nonVisual' }, ui: { autoExpandOnce: false, virtualCursor: false } }
+  writeFileSync(file, `\uFEFF${JSON.stringify(document)}`)
+  const settings = new SettingsStore(file).get()
+  assert.equal(settings.vision.strategy, 'nonVisual', 'the strategy survived the BOM')
+  assert.equal(settings.ui.autoExpandOnce, false, 'so did the switches')
+  assert.equal(settings.ui.virtualCursor, false)
+  assert.equal(settings.history.enabled, DEFAULT_SETTINGS.history.enabled, 'unspecified fields keep defaults')
+})

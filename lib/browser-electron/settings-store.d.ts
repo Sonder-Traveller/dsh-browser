@@ -8,6 +8,7 @@
  * defaults" rather than an error.
  * @module dsh-browser/browser-electron/settings-store
  */
+import type { BrowserChannel } from './system-browser.js';
 /** Vision/operation strategy the provider prefers when the model can see. */
 export type VisionStrategy = 'auto' | 'nonVisual';
 /** The full settings document, with every field resolved. */
@@ -34,6 +35,10 @@ export interface BrowserSettings {
     /** Visual vs non-visual operation strategy. */
     readonly vision: {
         readonly strategy: VisionStrategy;
+    };
+    /** Which browser binary carries the agent's pages. */
+    readonly browser: {
+        readonly channel: BrowserChannel;
     };
     /** Whether the agent may read cookies / export login state. */
     readonly credentials: {

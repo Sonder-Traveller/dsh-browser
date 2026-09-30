@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import type { BrowserChannel } from './system-browser.js'
 
 /** Vision/operation strategy the provider prefers when the model can see. */
 export type VisionStrategy = 'auto' | 'nonVisual'
@@ -41,6 +42,10 @@ export interface BrowserSettings {
   readonly vision: {
     readonly strategy: VisionStrategy
   }
+  /** Which browser binary carries the agent's pages. */
+  readonly browser: {
+    readonly channel: BrowserChannel
+  }
   /** Whether the agent may read cookies / export login state. */
   readonly credentials: {
     readonly allowRead: boolean
@@ -53,6 +58,10 @@ export const DEFAULT_SETTINGS: BrowserSettings = {
   cookies: { persist: true },
   ui: { autoExpandOnce: true, closeWithSession: false, virtualCursor: true },
   vision: { strategy: 'auto' },
+  // Bundled by default: it needs nothing installed, and on the desktop the carrier
+  // is the sidebar anyway. Choosing a system browser is an explicit opt-in because
+  // it starts a real Chrome/Edge with its own profile.
+  browser: { channel: 'bundled' },
   credentials: { allowRead: true },
 }
 
@@ -69,6 +78,18 @@ export function settingsPath(): string {
 /** Coerce one boolean field, keeping the default when absent or mistyped. */
 function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
+}
+
+/**
+ * Coerce the browser channel, keeping the default when it is not one of the
+ * known choices. A hand-edited typo must not silently select a different browser.
+ * @param value - the raw value from the settings document.
+ * @returns a valid channel.
+ */
+function resolveChannel(value: unknown): BrowserChannel {
+  return value === 'chrome' || value === 'edge' || value === 'auto' || value === 'bundled'
+    ? value
+    : DEFAULT_SETTINGS.browser.channel
 }
 
 /** Coerce one positive-integer field, keeping the default when invalid. */
@@ -96,6 +117,7 @@ export function resolveSettings(raw: unknown): BrowserSettings {
   const ui = section(source, 'ui')
   const vision = section(source, 'vision')
   const credentials = section(source, 'credentials')
+  const browser = section(source, 'browser')
   return {
     history: {
       enabled: bool(history.enabled, DEFAULT_SETTINGS.history.enabled),
@@ -109,6 +131,7 @@ export function resolveSettings(raw: unknown): BrowserSettings {
       virtualCursor: bool(ui.virtualCursor, DEFAULT_SETTINGS.ui.virtualCursor),
     },
     vision: { strategy: vision.strategy === 'nonVisual' ? 'nonVisual' : DEFAULT_SETTINGS.vision.strategy },
+    browser: { channel: resolveChannel(browser.channel) },
     credentials: { allowRead: bool(credentials.allowRead, DEFAULT_SETTINGS.credentials.allowRead) },
   }
 }
@@ -153,7 +176,13 @@ export class SettingsStore {
     }
     if (this.cached !== undefined && mtimeMs === this.cachedMtimeMs) return this.cached
     try {
-      this.cached = text === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(text))
+      // A leading BOM is what ordinary Windows editors (Notepad, PowerShell's
+      // `Set-Content -Encoding utf8`) leave behind, and `JSON.parse` rejects it.
+      // Without this strip, hand-editing the settings file silently discarded every
+      // value in it: the document looked correct, and the plugin quietly ran on
+      // defaults — including switches the user had just turned off.
+      const body = text?.replace(/^\uFEFF/, '')
+      this.cached = body === undefined ? DEFAULT_SETTINGS : resolveSettings(JSON.parse(body))
     } catch {
       // Malformed JSON: behave as defaults rather than fail startup.
       this.cached = DEFAULT_SETTINGS

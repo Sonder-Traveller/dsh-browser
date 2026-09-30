@@ -839,3 +839,97 @@ bump `0.1.23 → 0.2.0`,发布**第二十轮**(浏览历史持久化 / 设置页
 **验证**:`tsc` 构建零错误;`node --test tests/*.test.mjs` **70/70 全部通过**;真实 `dsh web` 0.2.0-rc.2 宿主上带 token 打开 GUI 实测 —— 启动图条目 67 → 68、设置栏出现并排在「规则设定」下方、6 个开关与视觉策略渲染正常、拨动开关即时落盘、`history.jsonl` 同步开始记录。
 
 **顺手记录**:`git describe` 显示 `0.1.7-rc.2-…` 只是本地 tag 未含 0.2 线;`git fetch --tags` 后为 `dsh-v0.2.0-rc.2`。
+
+---
+
+## 第二十一轮(2026-10-01,桌面端侧栏接管:agent 的页面 = 人看到的页面)
+
+**背景**:需求表 §1/§2 要求桌面端**由官方侧栏承载 agent 的浏览器**(人机同页),而不是插件再开一个平行窗口。此前插件在桌面端的真实表现已实测确认:它 spawn 自己的 Electron,弹出一个与桌面主窗口毫无隶属关系的独立窗口(`dsh-browser — about:blank`)。
+
+**关键调查(全部真机验证,非推断)**
+
+- 桌面端是**两层**:`DeepSeek Harness.exe`(Electron 外壳)+ `--expose-internals` 的 **Node 模式宿主**(`dsh-desktop-host`,插件就跑在这里,**没有 Electron API**);窗口只是加载宿主给出的 `dsh-app://app/`。
+- 宿主与外壳之间的事件集(`host-process.ts`)**没有任何与视图/窗口相关的通道**;0.2 又移除了 `electronViewHost` —— 所以"把视图贴进桌面窗口"没有现成机制可复用。
+- 桌面端安装目录里的 `app.asar` 已被替换为**解包的 `resources/app/`**(旁边还有 `app.asar.bak` 与 `app.asar.rename-pending`),因此**主进程代码可直接修改**;`lib/main.js` 旁还躺着 `main.js.dshpurge.bak`,说明改这台机器的桌面端是既有做法。
+- 侧栏浏览器的 guest **是懒创建的**:未导航时只有一个地址栏,**不存在任何 webContents**;导航后才出现 `type=webview` 的 guest(URL 形如 `about:blank#<leaseId>`,即 `browser-guests` 的租约)。
+
+**实现:一个 loopback bridge + 插件侧换一个宿主**
+
+| 位置 | 改动 |
+| --- | --- |
+| `apps/desktop/bridge/plugin-browser-bridge.js`(新增) | 主进程内的 bridge:loopback TCP + 随机 token;`list`(列出全部 webContents,标注 sidebar guest)、`cdp`(经 `webContents.debugger` 转发任意 CDP,按 guest 串行)、`ensureSidebar`(按需逼出侧栏 guest);endpoint 写入 `$DSH_HOME/dsh-builtin-browser-bridge.json` 并**每 15 秒刷新** |
+| `apps/desktop/bridge/install.mjs`(新增) | 幂等安装/回滚:备份 `main.js.before-bridge`、在 `export {};` 前注入启动片段、`--revert` 还原 |
+| `resources/app/lib/main.js`(已安装的桌面端) | 尾部 +8 行:app ready 后启动 bridge;失败不影响外壳 |
+| 插件 `src/browser-electron/desktop-bridge-host.ts`(新增) | 实现**同一个** `ElectronBrowserViewHost` seam,但命令走 bridge;缓存 guest 且**每次复用前核对存活** |
+| 插件 `src/browser-electron/entry.ts` | 先注册自托管(任何 surface 从第一次调用起就可用),发现 bridge 后**热切换**到侧栏并释放子进程;发现不到则照旧 |
+
+**实测(桌面端 `0.2.0-rc.2`,带 token 的真机)**
+
+- `browser_open https://example.com/` → 返回 `Example Domain`,`browser_content` 直接读到侧栏页面正文;
+- bridge 侧:`[webview] id=2 Example Domain https://example.com/` + 主窗口;
+- **零 `electron.exe` 进程、本次会话零 spawn、桌面端只有主窗口一个窗口** —— 独立浏览器窗口不再出现。
+
+**过程中被实测纠正的三个想当然**
+
+1. **地址栏那条路不可靠**:React 受控输入忽略合成的 `KeyboardEvent`(字段显示地址而组件状态未变),且字段的 focus 会被重渲染夺走(`document.activeElement` 实测为 `BODY`)。改为优先点侧栏自带的**「恢复页面」**(1 秒内逼出 guest),再用纯 CDP `Page.navigate` 导航 —— 不经过 UI。
+2. **endpoint 必须反复刷新**:一次性写入会让读者拿到**已退出实例**的地址(现象是莫名 `ECONNREFUSED`);改为每 15 秒重写并附带 `pid`/`updatedAt`。
+3. **认证消息不是命令**:把 token 单独一行发送时,服务端会把它也送进命令处理并回 `unknown op ""`;现在认证后立即 `continue`。
+
+**收尾语义(需求表 §3 按新载体重写)**:插件在此载体上**没有自己的窗口**,故"关界面 = 释放进程"不再适用 —— 改为:人关掉侧栏那个 tab → 插件下次操作前 `guestAlive` 核对失败 → **自动开一页新的**(等价于"这一页结束了"),而浏览历史与登录状态照旧保留在磁盘。
+
+**验证**:`tsc` 零错误;`node --test tests/*.test.mjs` **70/70 全绿**;上述真机端到端。
+
+**状态**:插件侧未 bump 版本、未发布;桌面端改动以 `install.mjs` 形式可重放(桌面端升级后需重跑)。
+
+---
+
+## 第二十二轮(2026-10-01,issue #16:错误上报路径不得致命)
+
+**报告**:`notifyUserActionError detaches the host method, crashing the whole DSH host`。诊断准确,两条路径都成立:
+
+1. `ElectronBrowserProvider.notifyUserActionError` **把宿主方法取出来再非绑定调用**,于是宿主实现第一句 `void this.ready()` 抛出 `Cannot read properties of undefined (reading 'ready')`;该异常位于 async 的 catch 里,变成 unhandled rejection,宿主退出 1。
+2. 即便绑定正确,`RemoteElectronViewHost.ready()` 在宿主已 dispose 时**同步抛**,`.catch()` 接不住 —— 同一类 fire-and-forget 方法(`destroyView`/`groupView`/`showView`)形状相同。
+
+**修复**:provider 改为**在属主上调用**(`notify.call(host, …)`)并全程容错(上报失败只记一行 stderr);`ready()` 不再同步抛,改为返回 rejected promise(并标记已处理,忘了挂 catch 也不会变成 unhandled)。**回归测试** 4 条(含用报告里那个会读 `this` 的 stub 驱动的失败工具栏动作)。
+
+## 第二十三轮(2026-10-01,undici CVE + 依赖卫生)
+
+**报告**:issue/PR #18 —— 自动安全修复建议升级 `undici`(CVE-2026-84961,BalancedPool 选项处理)。
+
+**核实**:CVE 真实;**但 PR 的做法在本仓库失效** —— `pnpm.overrides` 写在 `package.json` 里,pnpm 10 起已不再读取该字段(实测打印警告并忽略,lock 里仍是 7.29.0)。
+
+**修复**:新建 `pnpm-workspace.yaml`(pnpm 11 的正确位置),锁 `undici: 7.29.1`(同大版本,不做无收益的 8.x 跳跃)。影响面已说明:undici 只是传递依赖,插件不 import 它,发布物也不含 `node_modules` —— 价值在于保持仓库依赖树干净。
+
+## 第二十四轮(2026-10-01,需求表 v2 逐条落地)
+
+| 需求 | 实现 |
+| --- | --- |
+| §7 视觉策略 | `nonVisual` 下**拒绝坐标点击**并给出可执行替代;工具描述改为语义优先;设置面板文案与真实行为对齐(**此前该设置项是死的**) |
+| 非视觉输出 | 快照用 `depth` 做**层级缩进**、坐标改按需(`coords: true`)、去空 `states`;`content(txt)` 改用浏览器渲染文本 |
+| §8 明示 | README 中英 + 设置面板写明沙箱边界变化(三个后果 + 两个开关 + 回退方式) |
+| §3 生命周期 | `closeWithSession`(会话结束释放页面)/ `autoExpandOnce`(不抢屏则折叠)真正接线;bridge 新增 `closeSidebarBrowser`、`collapseSidebar` |
+| §4 多会话隔离 | 每个 view 独占一个侧栏标签;释放时**只关自己的**(按 guest id 反查标题) |
+| §5 历史检索 | 新增 `query`(URL/标题)与 `session`(来源会话)过滤,可组合 |
+| §6 可视化鼠标 | 新增**操作气泡**,在指针旁叙述当前动作 |
+
+**顺带修掉的 6 个真 bug**(均为实测发现):`content(txt)` 把逐字动画页面的文字拆成一列字母;`ensureSidebar` 因找不到地址栏而直接抛错,**重启后第一次调用必失败**;`vision.strategy`/`closeWithSession`/`autoExpandOnce` 三个设置项**存了却不被读取**;`releasePage` 会**关掉别人的标签**(多会话时结束一个会带走另一个的页面,自己引入的);**设置文件带 BOM 时全部设置被静默丢弃**(记事本/PowerShell 写入即触发)。
+
+## 第二十五轮(2026-10-01,速度优化 + 结构拆分)
+
+**量化**(真机测量,10 次均值):每次**新建连接** 24.8ms、复用连接 **0.2ms**;每条命令原本要付 `连接 + list 存活检查 + 命令` = **49.1ms**,而一次 `browser_click` 会发多条 CDP,开销成倍。
+
+**优化**:`BridgeConnection` 改为**长连接 + 请求串行**(0.6ms);**去掉每条命令前的 `list` 存活检查**,改为"命令失败才重建 guest"(真实错误照旧上抛)。传输层拆成独立模块 `bridge-connection.ts`(`desktop-bridge-host.ts` 426 → 306 行)。
+
+**鼠标**:位置未变时**不再重绘**(省一次往返,也消除同点重绘造成的顿卡),点击仍强制播放涟漪;缓动改为 `190ms cubic-bezier(.22,.85,.24,1)`;新增 `forgetCursor` —— 文档被替换后必须清缓存,否则导航后**指针再也不会出现**。
+
+## 第二十六轮(2026-10-01,可选用本机 Chrome / Edge)
+
+**新增载体**:设置里可选 `bundled` / `auto` / `chrome` / `edge`(`browser.channel`),做法与 Codex Browser Use 一致 —— `--remote-debugging-port=0` 启动,读浏览器自己写下的 `DevToolsActivePort` 取端口,全程走 CDP(Node 22 内置 `WebSocket`,**零新增依赖**)。
+
+**数据隔离**:使用**独立 profile**(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),绝不打开、占用或修改用户日常的窗口、书签与登录状态;插件退出也不会关掉用户的浏览器。
+
+**登录态**:`cookies.persist` **开**(默认)→ 固定 profile 保留,重启 DSH 仍是登录状态,`browser_auth` 照常可导出/恢复;`persist` **关** → 临时 profile,释放时整个目录删除。
+
+**优先级与回退**:显式选择的本机浏览器 > 桌面端侧栏 > 自托管;选定的浏览器没装或起不来时**记警告并继续用内置**,不静默替换。
+
+**结构**:bridge 纳入插件仓库(`desktop-bridge/`,`install.mjs` 幂等 + `--revert`),并写进 npm 打包清单 —— 此前它只存在于 DSH 仓库,用户装了插件也拿不到。

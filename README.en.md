@@ -242,7 +242,52 @@ agent (browser_* tools)
 
 ## Division of labor with the desktop shell
 
-The browser's **visible view**, the **browser column layout**, and the **column-to-view alignment** belong to the host shell (e.g. dsh's `apps/desktop`), not this plugin. This plugin consumes the shell-provided `electronViewHost` and owns the seam, provider, and tools. Without a shell the plugin **self-hosts** and everything still works.
+There are three carriers, and the plugin picks one automatically — **no configuration**:
+
+**① Desktop: drive the official sidebar's page (one page for both parties)**
+
+DSH Desktop is two layers: an Electron shell plus an `--expose-internals` **Node-mode host** (the plugin runs there, with **no Electron API**). 0.2 removed `electronViewHost`, and the host/shell event set carries nothing view-related either — so the plugin borrows a **small bridge**: a loopback + token service inside the shell's main process hands the plugin CDP access to the sidebar browser's guest, i.e. the very page you see on screen.
+
+The result: **the page the agent works on is the page the human looks at**. The plugin no longer spawns its own Electron and no second window appears.
+
+Install that bridge (it modifies an **installed** desktop app, so it is replayable):
+
+```bash
+node desktop-bridge/install.mjs            # idempotent; backs up main.js.before-bridge on first run
+node desktop-bridge/install.mjs --revert   # roll back
+```
+
+> **Re-run `install.mjs` after every desktop upgrade** — the upgrade replaces `resources/app/` and takes the bridge with it. With no bridge the plugin falls back to self-hosting: nothing breaks, you just get a separate window again.
+
+> **⚠️ What the sandbox boundary change means**
+>
+> The official sidebar browser is built on the premise that its pages are **not readable from outside** — it uses a separate partition and the shell refuses cross-site content access. Letting the agent drive that guest **deliberately breaks that premise**:
+>
+> - the agent can read the content of **any page you open in the sidebar** (that is precisely what "one page for both parties" means);
+> - the agent can read the **cookies and login state** in that partition, and `browser_auth` can export them (controlled by a setting);
+> - your actions in the sidebar and the agent's actions act on **the same page** and can affect each other (the agent will not overwrite what you are typing, but navigation changes what you both see).
+>
+> That is the inherent cost of one shared page. We think it is worth it — it turns "the agent is doing something in a window you cannot see" into "you can watch it work and take over" — but you are entitled to know it exists, so there are switches: with **credential access** off the agent stops reading cookies and login state, and with the **vision strategy** set to non-visual any coordinate click that depends on a screenshot is refused. If you would rather not accept the boundary change at all, removing the plugin from the desktop profile returns you to the old separate-window shape.
+
+**② Use the browser you already have (Chrome / Edge)**
+
+The settings panel can point the plugin at an **installed Chrome or Edge** (`browser.channel`: `bundled` / `auto` / `chrome` / `edge`). The approach is the same one Codex Browser Use takes: launch it with `--remote-debugging-port=0`, read the port it writes into `DevToolsActivePort`, and drive it entirely over CDP (through Node 22's built-in `WebSocket` — **no new dependency**).
+
+**Your data is not touched**: the plugin launches it with a **separate profile** (`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`). Your everyday windows, bookmarks and logins are never opened, locked or modified, and closing the plugin never closes your browser.
+
+**What happens to login state**:
+
+- `cookies.persist` **on** (default) → that fixed profile is kept, so **you stay signed in across DSH restarts**, and `browser_auth` can still export/restore its cookies.
+- `cookies.persist` **off** → a **throwaway profile** each time, deleted when the browser is released; no login trace is left behind.
+- The trade-off, stated plainly: a separate profile **does not see** the sites you are signed into in your everyday browser. Sign in once in the window the plugin opens and the session stays in its own profile.
+
+**③ A shell that provides `electronViewHost`** (older desktop shells): that view is used directly.
+
+**④ No shell at all (plain `dsh web`)**: self-hosted — the plugin spawns the Electron it ships.
+
+> The visible view and column layout always belong to the host shell; the plugin owns the seam, the provider and the tools. Across all carriers the **toolset, browsing history, settings panel, synthetic cursor and teardown rules are identical** — only the carrier of the page differs.
+>
+> **Precedence**: an explicitly chosen installed browser > the desktop sidebar > self-hosting. If the chosen browser is **missing or fails to start**, a warning is logged and the bundled browser is kept — it is **never silently swapped** for something else.
 
 ## Requirements
 

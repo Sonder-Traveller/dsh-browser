@@ -145,7 +145,15 @@ export declare class RemoteElectronViewHost implements ElectronBrowserViewHost {
      * on a cooldown heals it by itself while keeping the scan off the hot path.
      */
     available(): boolean;
-    /** Ensure the child is up and ready (lazy on first use; restarts after a crash). */
+    /**
+     * Ensure the child is up and ready (lazy on first use; restarts after a crash).
+     *
+     * Never throws synchronously. Callers are fire-and-forget
+     * (`void this.ready().then(…).catch(…)`), and a synchronous throw escapes their
+     * `.catch` entirely — the shape that let a failed toolbar report take the whole
+     * DSH host down (issue #16). A disposed host is reported as a rejected promise
+     * instead, which those callers already handle.
+     */
     private ready;
     private start;
     /** The child died: tear down so the next use starts a fresh child. */

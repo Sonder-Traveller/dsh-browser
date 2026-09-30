@@ -161,15 +161,26 @@ function parseFillValue(v: string | undefined): string | number | boolean {
   return v ?? ''
 }
 
-/** Format a snapshot element list for the model. */
+/**
+ * Format a snapshot element list for the model.
+ *
+ * Coordinates are opt-in. They are only meaningful to a caller that intends to
+ * click a pixel position, which means a vision pass; for the far more common case
+ * of locating an element by role/label and passing a semantic target, they are the
+ * bulkiest and least useful part of every line. Omitting them keeps the listing
+ * readable — which is exactly what a model without image input has to work from.
+ * @param snapshot - the snapshot payload.
+ * @param options - `coords: true` to include each element's viewport position.
+ */
 function formatSnapshot(snapshot: {
   url: string
   title?: string
   elements: readonly { ref: number; kind: string; label: string; x: number; y: number; frame?: boolean }[]
   truncated?: boolean
   challenge?: { blocked: boolean; kind?: string; reason?: string }
-}): string {
-  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.frame === true ? ' (iframe)' : ''} (${el.x},${el.y})`)
+}, options: { coords?: boolean } = {}): string {
+  const showCoords = options.coords === true
+  const lines = snapshot.elements.map(el => `[${el.ref}] ${el.kind}: ${el.label}${el.frame === true ? ' (iframe)' : ''}${showCoords ? ` (${el.x},${el.y})` : ''}`)
   const header = `URL: ${snapshot.url}${snapshot.title !== undefined ? `\nTitle: ${snapshot.title}` : ''}`
   const body = lines.length > 0 ? lines.join('\n') : '(no interactive elements found)'
   const tail = snapshot.truncated === true ? '\n(snapshot truncated)' : ''
@@ -241,7 +252,10 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
+      // browser_open is an overview of what just loaded, not a locator: it has no
+      // `coords` parameter, so coordinates stay off here (browser_snapshot owns
+      // that switch for callers that actually target pixels).
+      render: (args, value) => [{ type: 'text', text: formatSnapshot(value, { coords: (args as { coords?: boolean }).coords === true }) }],
     },
     timeoutMs,
     isConcurrencySafe: () => false, // opens tabs / navigates; exclusive within a task
@@ -267,8 +281,10 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_snapshot',
-    description: 'Return an AI-friendly snapshot of the current shared-browser page: numbered interactive elements (inputs, buttons, links) the model can cite. Use this to understand an interactive page before driving it.',
-    parameters: {},
+    description: 'Return an AI-friendly snapshot of the current shared-browser page: numbered interactive elements (inputs, buttons, links) the model can cite. This is the primary way to understand a page, and it needs no image input — every listed element can afterwards be addressed by a semantic target (browser_click, browser_type, browser_check, …) rather than by coordinates.',
+    parameters: {
+      coords: { type: 'boolean', description: 'Also print each element\'s viewport coordinates. Off by default; only useful when a vision pass is going to click a pixel position.' },
+    },
     output: {
       schema: {
         type: 'object',
@@ -304,7 +320,7 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: formatSnapshot(value) }],
+      render: (args, value) => [{ type: 'text', text: formatSnapshot(value, { coords: args.coords === true }) }],
     },
     timeoutMs,
     isConcurrencySafe: () => true,
@@ -329,6 +345,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     parameters: {
       includeHidden: { type: 'boolean', description: 'Include hidden elements (default false).' },
       maxNodes: { type: 'number', description: 'Maximum nodes (default 500, range 10-5000).' },
+      coords: { type: 'boolean', description: 'Include each element\'s viewport coordinates. Off by default: a semantic target needs no coordinates, and they are pure noise unless a vision pass is going to click a pixel position.' },
     },
     output: {
       schema: {
@@ -361,14 +378,24 @@ export function apply(ctx: Context, config: Config = {}): void {
           },
         },
       },
-      render: (_args, value) => {
+      render: (args, value) => {
         const nodes = value.nodes as Array<{ ref: number; role: string; name: string; value?: string | null; states: string[]; depth: number; tag: string; x: number; y: number; frame?: boolean }>
+        // Built for reading, not for imaging: containment is shown as indentation
+        // (the depth was already collected and simply thrown away), an empty state
+        // list adds nothing, and coordinates appear only when asked for — a model
+        // working from the DOM never needs them, and they are the bulkiest part of
+        // every line.
+        const showCoords = args.coords === true
         const lines = nodes.map(n => {
           const valuePart = n.value !== undefined && n.value !== null ? ` value="${String(n.value).slice(0, 60)}"` : ''
-          return `[${n.ref}] ${n.role} "${n.name}"${valuePart} (${n.x},${n.y}) states=[${n.states.join(',')}]${n.frame === true ? ' (iframe)' : ''}`
+          const indent = '  '.repeat(Math.max(0, Math.min(8, Number(n.depth) || 0)))
+          const coordsPart = showCoords ? ` (${n.x},${n.y})` : ''
+          const statePart = Array.isArray(n.states) && n.states.length > 0 ? ` states=[${n.states.join(',')}]` : ''
+          return `${indent}[${n.ref}] ${n.role} "${n.name}"${valuePart}${coordsPart}${statePart}${n.frame === true ? ' (iframe)' : ''}`
         })
         const header = `URL: ${value.url}${value.title !== undefined ? `\nTitle: ${value.title}` : ''}`
-        return [{ type: 'text', text: `${header}\n\n${lines.length > 0 ? lines.join('\n') : '(no accessible interactive nodes)'}${value.truncated === true ? '\n(truncated)' : ''}` }]
+        const hint = showCoords ? '' : '\n(coordinates omitted — pass coords: true to include them, or click by semantic target)'
+        return [{ type: 'text', text: `${header}\n\n${lines.length > 0 ? lines.join('\n') : '(no accessible interactive nodes)'}${value.truncated === true ? '\n(truncated)' : ''}${hint}` }]
       },
     },
     timeoutMs,
@@ -601,7 +628,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_click',
-    description: 'Click in the shared browser. Two ways: (1) semantic target — pass target {by: css|text|xpath, value, index?} and the element is located, scrolled into view and clicked at its center; (2) viewport coordinates (x/y) — use with browser_screenshot when a vision model locates an element on the screenshot (covers icons, image buttons, and canvas that DOM locators cannot target). Provide exactly one of target or x/y.',
+    description: 'Click in the shared browser. Prefer the semantic target: pass target {by: css|text|xpath, value, index?} and the element is located from the DOM, scrolled into view and clicked at its centre — this needs no image input and is the only form that works without vision. The alternative is viewport coordinates (x/y), which are meaningful only after a vision model has located the element on a browser_screenshot; coordinate clicks are refused outright under the non-visual strategy. Provide exactly one of target or x/y.',
     parameters: {
       target: {
         type: 'object',
@@ -613,8 +640,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         },
         description: 'Locate the element semantically and click it (css/text/xpath).',
       },
-      x: { type: 'number', description: 'Viewport x coordinate (CSS px), e.g. from a vision model reading the screenshot.' },
-      y: { type: 'number', description: 'Viewport y coordinate (CSS px).' },
+      x: { type: 'number', description: 'Viewport x coordinate (CSS px), taken from a browser_screenshot read by a vision model. Prefer a semantic target — it works without image input.' },
+      y: { type: 'number', description: 'Viewport y coordinate (CSS px), taken from the same screenshot as x.' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { clicked: { type: 'boolean', required: true } } },
@@ -1089,7 +1116,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   ctx.tools.register(defineTool({
     name: 'browser_screenshot',
-    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). Use for visual confirmation of layout, charts, designs, or CAPTCHAs, or to feed a vision tool (read_image) that locates elements visually. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG is only available on the self-hosted native path; the desktop-shell path returns PNG.',
+    description: 'Capture the current shared-browser page as a screenshot (PNG default, JPEG optional). This is for models that can read images: layout checks, charts, designs, CAPTCHAs, or locating an element by eye before clicking its coordinates. A model without image input gains nothing from it — browser_snapshot, browser_a11y and browser_content carry the same page as text, and browser_scrape extracts structured data. Supports full-page capture, save-to-file, JPEG encoding, and downscaling (maxWidth/maxHeight) to cut vision-tool token cost. JPEG is only available on the self-hosted native path; the desktop-shell path returns PNG.',
     parameters: {
       fullPage: { type: 'boolean', description: 'Capture the full scrollable page instead of the viewport (default false).' },
       savePath: { type: 'string', description: 'Absolute file path to also save the image to (e.g. for read_image vision location). Must resolve inside the configured downloadDir (default: the system Downloads folder, localized names such as ~/下载 included); an existing file is never overwritten.' },
@@ -1338,6 +1365,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     parameters: {
       limit: { type: 'number', description: 'Maximum entries to return (default 30, capped at 200).' },
       domain: { type: 'string', description: 'Only visits whose hostname contains this text (case-insensitive).' },
+      query: { type: 'string', description: 'Only visits whose URL or title contains this text (case-insensitive).' },
+      session: { type: 'string', description: 'Only visits recorded by this task/session label — use it to separate your own pages from another session\'s or the human\'s.' },
     },
     output: {
       schema: {
@@ -1384,7 +1413,14 @@ export function apply(ctx: Context, config: Config = {}): void {
       const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? args.limit : 30
       const limit = Math.max(1, Math.min(200, Math.floor(rawLimit)))
       const domain = typeof args.domain === 'string' && args.domain.trim() !== '' ? args.domain.trim() : undefined
-      const entries = browser.visited({ limit, ...domain !== undefined ? { domain } : {} })
+      const query = typeof args.query === 'string' && args.query.trim() !== '' ? args.query.trim() : undefined
+      const session = typeof args.session === 'string' && args.session.trim() !== '' ? args.session.trim() : undefined
+      const entries = browser.visited({
+        limit,
+        ...domain !== undefined ? { domain } : {},
+        ...query !== undefined ? { query } : {},
+        ...session !== undefined ? { session } : {},
+      })
       return {
         count: entries.length,
         entries: entries.map(entry => ({

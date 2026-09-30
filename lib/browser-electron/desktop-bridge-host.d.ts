@@ -1,0 +1,124 @@
+/**
+ * Desktop-sidebar browser host: drive the page the desktop shell shows in its
+ * sidebar, instead of spawning a second, parallel Electron window.
+ *
+ * WHY
+ * The plugin runs inside the desktop's Node-mode host, where there is no Electron
+ * API — which is why it self-hosts a whole browser today. The shell, however, can
+ * own views, and its sidebar already displays real web pages. This host borrows
+ * that page over the shell's bridge (see apps/desktop/bridge/plugin-browser-bridge.js),
+ * so the agent and the human end up on ONE page instead of two.
+ *
+ * CONTRACT
+ * It implements the same `ElectronBrowserViewHost` seam the self-hosted host does,
+ * so the provider, the tools, browsing history, the synthetic cursor and the
+ * teardown rules are all unchanged: only the carrier differs. Everything is
+ * lazily materialized — a fresh shell has no sidebar guest until something asks
+ * for a page, and the bridge creates one on demand.
+ *
+ * FALLBACK
+ * `discover()` returns undefined whenever the shell offers no usable bridge
+ * (older desktop build, plain `dsh web`, bridge not started), and the entry point
+ * then keeps the self-hosted Electron it has always used.
+ * @module dsh-browser/browser-electron/desktop-bridge-host
+ */
+import type { ElectronBrowserViewHost, ElectronViewHandle } from './provider.js';
+import type { BrowserUserAction } from './provider.js';
+/** Absolute path of the endpoint file the shell writes. */
+export declare function bridgeEndpointPath(): string;
+/**
+ * The desktop sidebar, presented as a browser view host.
+ *
+ * One sidebar exists per shell window, so every view this host hands out refers
+ * to the same guest: the provider keeps its tab bookkeeping, and the tabs simply
+ * share the visible page. That is the intended behaviour for this carrier — the
+ * point is a single page both parties can see.
+ */
+export declare class DesktopBridgeViewHost implements ElectronBrowserViewHost {
+    private readonly endpoint;
+    private readonly connection;
+    private readonly views;
+    /**
+     * Guests whose view is gone but whose page may still be open in the sidebar.
+     *
+     * The provider destroys its view handles before it asks for a release, so the
+     * mapping is dropped by then — keeping the guest ids here is what lets us close
+     * only our own tabs when several sessions are running (requirements §4: each
+     * session gets its own page).
+     */
+    private readonly orphaned;
+    private userActionHandler;
+    /**
+     * @param endpoint - the shell's published bridge endpoint.
+     */
+    private constructor();
+    /**
+     * Find a usable desktop bridge, if this surface has one.
+     *
+     * A stale endpoint (a shell that already exited, leaving its file behind) is
+     * rejected here rather than surfacing later as a mysterious ECONNREFUSED: the
+     * caller falls back to self-hosting, which always works.
+     * @returns the host, or undefined when no bridge is available.
+     */
+    static discover(): Promise<DesktopBridgeViewHost | undefined>;
+    /** Whether this host can back views: the bridge already answered `list`. */
+    available(): boolean;
+    /**
+     * The guest id backing a view, materialized on first use.
+     *
+     * The sidebar browser is itself a multi-tab surface, so each view gets its own
+     * tab's guest: the provider's tab bookkeeping then maps onto real tabs the human
+     * can see and switch between. Two rules keep that honest:
+     *   - a cached guest is used as-is: probing it first cost a round-trip on every
+     *     command, so liveness is established by the command failing instead;
+     *   - a fresh view takes an unclaimed guest, growing the tab strip only when
+     *     every existing guest is already spoken for.
+     * @param viewId - the view whose guest is wanted.
+     * @param url - address to use when a sidebar browser has to be opened first.
+     */
+    private guestFor;
+    /**
+     * Ask for at least `count` sidebar tabs and return their guest ids.
+     * @param count - minimum number of tabs.
+     */
+    private guestIds;
+    createView(): ElectronViewHandle;
+    destroyView(handle: ElectronViewHandle): void;
+    /**
+     * Nothing to show: the sidebar is already on screen, and showing it again is
+     * the shell's business (it owns the tab strip and the visibility toggle).
+     */
+    showView(): void;
+    /** Same as {@link showView}: the page is already presented by the shell. */
+    presentView(): Promise<void>;
+    /**
+     * The shell owns window grouping, and one sidebar serves every view, so there
+     * is nothing to record here. (It must not write a placeholder guest id either:
+     * a view whose guest is not yet materialized has to stay absent from the map,
+     * or the first real command would be sent to the placeholder.)
+     */
+    groupView(): void;
+    /** Focus is the shell's to manage, and there is no separate window to raise. */
+    focus(): Promise<void>;
+    onUserAction(handler: (action: BrowserUserAction) => void): void;
+    /** The shell reports its own window lifecycle; nothing to subscribe to here. */
+    onViewClosed(): void;
+    /**
+     * Release the sidebar's browser pages (requirements §3, `ui.closeWithSession`).
+     *
+     * Destroying our own view handles is not enough on this carrier: the sidebar
+     * belongs to the shell and would happily keep the page (and its renderer) alive.
+     * Closing the tabs is what actually ends the page — and only the page: cookies
+     * live in the partition, history on disk, so both survive.
+     * @returns a promise that settles once the shell has been asked.
+     */
+    releasePage(): Promise<void>;
+    /**
+     * Fold the sidebar away without ending the page (`ui.autoExpandOnce` is off, or
+     * the caller wants the screen back while work continues).
+     * @returns a promise that settles once the shell has been asked.
+     */
+    collapse(): Promise<void>;
+    /** No child process of our own to stop; close the shared connection instead. */
+    dispose(): void;
+}

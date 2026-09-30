@@ -242,7 +242,52 @@ agent (browser_* 工具)
 
 ## 与桌面外壳的分工
 
-浏览器**可见视图**、**浏览器列布局**、**列与视图的对齐**都属于宿主外壳(如 dsh 的 `apps/desktop`),不在本插件内。本插件只消费外壳提供的 `electronViewHost`,负责 seam、provider 与工具。没有配套外壳时插件**自托管**,功能照常可用。
+有三种形态,插件会自动选择,**无需配置**:
+
+**① 桌面端:驱动官方侧栏的页面(人机同页)**
+
+DSH Desktop 是两层结构:Electron 外壳 + 一个 `--expose-internals` 的 **Node 模式宿主**(插件就跑在宿主里,**没有 Electron API**)。0.2 移除了 `electronViewHost`,宿主与外壳之间也没有任何承载视图的通道,所以插件**借道一条小桥**:外壳主进程里跑一个 loopback + token 的 bridge,把侧栏浏览器的 guest(就是你在界面上看到的那个页面)的 CDP 交给插件。
+
+结果是:**agent 操作的页面就是人看的页面**,插件不再 spawn 自己的 Electron,也不再出现第二个窗口。
+
+安装这条桥(改的是**已安装的桌面端**,所以做成可重放):
+
+```bash
+node desktop-bridge/install.mjs            # 幂等;首次会备份 main.js.before-bridge
+node desktop-bridge/install.mjs --revert   # 回滚
+```
+
+> **桌面端升级后要重跑一次 `install.mjs`** —— 升级会替换 `resources/app/`,bridge 随之消失。bridge 不在时插件自动退回自托管,功能不会中断,只是会多出一个独立窗口。
+
+> **⚠️ 沙箱边界的变化(请明示知悉)**
+>
+> 官方侧栏浏览器的前提是:侧栏里的页面**不被外部读取** —— 它有独立的 partition,且宿主拒绝跨站内容访问。让 Agent 驱动该 guest,等于**有意打破这个前提**:
+>
+> - Agent 能读到你在侧栏访问的**任何页面的内容**(这正是"人机同页"的意义);
+> - Agent 能读到该 partition 中的 **Cookie / 登录态**,`browser_auth` 可将其导出(由设置项控制);
+> - 反过来,你在侧栏里的操作与 Agent 的操作**作用于同一个页面**,可能互相影响(Agent 不会主动覆盖你的输入,但导航会改变双方看到的内容)。
+>
+> 这是"人机同页"的必然代价。我们认为值得(它把"Agent 在一个你看不见的窗口里操作"变成"你能看着它操作并随时接手"),但你有权知道它存在 —— 因此也提供了开关:**「凭据访问」关闭后 Agent 不再读取 Cookie/登录态**;**「视觉策略」设为纯非视觉后,任何依赖截图定位的坐标点击都会被拒绝**。不想接受这个边界变化时,把 desktop profile 里的插件移除即可回到"独立窗口"的旧形态。
+
+**② 用你自己的浏览器(Chrome / Edge)**
+
+设置里可以把载体改成**本机已安装的 Chrome 或 Edge**(`browser.channel`:`bundled` / `auto` / `chrome` / `edge`)。做法与 Codex Browser Use 一致:以 `--remote-debugging-port=0` 启动,读浏览器自己写下的 `DevToolsActivePort` 得到端口,再全程走 CDP(用 Node 22 内置的 `WebSocket`,**不新增依赖**)。
+
+**你自己的数据不会被碰**:插件用的是**独立 profile**(`$DSH_HOME/dsh-builtin-browser-host/<chrome|edge>-profile`),不会打开、占用或修改你日常的窗口、书签与登录状态;插件退出也不会关掉你的浏览器。
+
+**登录态怎么办**:
+
+- `cookies.persist` **开**(默认)→ 上面那个固定 profile 会保留,**重启 DSH 后仍是登录状态**;`browser_auth` 也照常可导出/恢复该 profile 的 Cookie。
+- `cookies.persist` **关** → 每次用**临时 profile**,释放浏览器时整个目录被删除,不留登录痕迹。
+- 代价要说清:独立 profile **看不到**你日常浏览器里已登录的站点 —— 在插件打开的窗口里登录一次即可,之后登录态就存在它自己的 profile 里。
+
+**③ 有 `electronViewHost` 的宿主(旧版桌面外壳)**:直接使用外壳提供的视图。
+
+**④ 没有外壳(纯 `dsh web`)**:自托管 —— spawn 插件自带的 Electron 窗口,功能照常。
+
+> 可见视图与列布局始终属于宿主外壳;插件只负责 seam、provider 与工具。各形态下**工具集、浏览历史、设置栏、可视化鼠标、收尾语义完全一致**,差别只在页面由谁承载。
+>
+> **优先级**:设置里显式选择的本机浏览器 > 桌面端侧栏 > 自托管。选定的浏览器**没装或起不来**时会记一条警告并继续用内置浏览器 —— **不会静默换成别的**。
 
 ## 环境要求
 
@@ -270,18 +315,24 @@ agent (browser_* 工具)
 
 **桌面端(DSH Desktop)**
 - 插件是桌面端 profile 里的依赖(profile 目录通常是 `$DSH_HOME/profiles/desktop`)。更新它 = 把该 profile 里的依赖更新到新版本,然后**重启 DSH Desktop**,客户端设置栏与工具才会换成新代码。
-- 浏览器内核由桌面端自带的 Electron 提供,插件不会再下载一份 Electron。
-- 桌面端自身的升级不会自动带来插件升级,需要按上面的方式单独更新。
+- **桌面端还多一步,而 Web 端没有**:让插件驱动侧栏的那条 bridge 装在**桌面端自己的安装目录**里(`resources/app/`),插件更新**不会**带上它。桌面端升级会替换该目录、bridge 随之消失,所以请重跑一次:
+  ```bash
+  node desktop-bridge/install.mjs            # 幂等;已装则只刷新模块
+  node desktop-bridge/install.mjs --revert   # 回滚
+  ```
+  bridge 不在时插件自动退回自托管(多出一个独立窗口),功能不中断。
+- 浏览器内核默认由桌面端自带的 Electron 提供,插件不会再下载一份 Electron;也可以在设置里改用它自己装的 Chrome / Edge。
 
 **Web 端(`dsh web`)**
 - 插件是 web profile 里的依赖(`$DSH_HOME/profiles/web`),更新后**重启 `dsh web`** 生效。
-- Web 端没有桌面外壳,共享浏览器由插件自托管拉起:首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
+- Web 端**没有侧栏、也没有 bridge**:共享浏览器由插件自托管拉起。首次安装可能需要 Electron 二进制;若包管理器的构建白名单拦下了它(pnpm v10+ 会拦 `electron` 的 postinstall),执行一次 `npx install-electron` 补上即可。
+- 同样可以在设置里改用本机 Chrome / Edge —— 这是两端**行为一致**的选项。
 - 更新方式与你首次安装它时一致(按 npm 包名 `dsh-builtin-browser`、按 GitHub 仓库 `wqty123/dsh-browser`,或本地目录)。
 
 **两端一致的体验**
-- 工具集(34 个 `browser_*`)、设置页里的「浏览器」栏、浏览历史与 cookie 的持久化行为完全相同;差别只在浏览器窗口由谁承载(桌面外壳 / 插件自托管)。
-- 升级不会丢数据:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),登录状态在同一 profile 目录里。
-- 升级后如果历史记录不符合预期,先去「设置 → 浏览器」确认这些开关:历史默认**开**、侧栏自动展开默认**开**、会话结束时自动关闭浏览器默认**关**。
+- 工具集(34 个 `browser_*`)、设置页里的「浏览器」栏、浏览历史与 cookie 的持久化行为完全相同;差别只在页面由谁承载(桌面端=官方侧栏,Web 端=插件自托管窗口,或你在设置里指定的本机浏览器)。
+- 升级不会丢数据:浏览历史与设置都在 `$DSH_HOME/dsh-builtin-browser-host/`(`history.jsonl`、`settings.json`),登录状态在同一 profile 目录里 —— 包括使用本机浏览器时的 `<chrome|edge>-profile`。
+- 升级后如果历史记录不符合预期,先去「设置 → 浏览器」确认这些开关:历史默认**开**、侧栏自动展开默认**开**、会话结束时自动关闭浏览器默认**关**、载体默认**内置**。
 
 ## 已知限制
 

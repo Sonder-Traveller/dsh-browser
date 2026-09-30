@@ -53,12 +53,16 @@ export declare class HistoryStore {
     /**
      * Read visits, newest first. Unparseable lines are skipped; entries older
      * than the age limit are filtered out but left on disk until the next prune.
-     * @param options - optional result cap and domain filter.
+     * @param options - optional result cap plus three filters: `domain` (hostname),
+     *   `query` (substring of the URL or title) and `session` (the task that visited
+     *   it). Filters compose, so "the pages THIS task opened on that host" is one call.
      * @returns the matching visits, newest first.
      */
     list(options?: {
         readonly limit?: number;
         readonly domain?: string;
+        readonly query?: string;
+        readonly session?: string;
     }): VisitedPage[];
     /**
      * Enforce retention: drop entries past the age limit, then the oldest beyond

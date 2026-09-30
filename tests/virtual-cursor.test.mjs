@@ -3,7 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { cursorScript } from '../lib/browser-electron/virtual-cursor.js'
+import { cursorScript, forgetCursor, paintCursor } from '../lib/browser-electron/virtual-cursor.js'
 import { DEFAULT_SETTINGS } from '../lib/browser-electron/settings-store.js'
 import { ElectronBrowserProvider } from '../lib/browser-electron/provider.js'
 
@@ -91,4 +91,31 @@ test('the cursor can be switched off, and nothing is painted then', async () => 
 
   assert.equal(host.expressions.filter(e => e.includes('__dsh_agent_cursor__')).length, 0)
   await p.close(sid)
+})
+
+// A single tool call emits several CDP commands, and the pointer is repainted for
+// each one that moves it. Repainting to the same pixel is a wasted round-trip and a
+// visible stutter, so an unchanged position is skipped — but only until the document
+// is replaced, because the overlay lived in the old document and is gone with it.
+test('an unchanged position is not repainted, and a new document resets that', () => {
+  const handle = { id: 'view' }
+  const painted = []
+  const evaluate = (_handle, expression) => { painted.push(expression); return Promise.resolve(true) }
+
+  paintCursor(handle, 10, 20, 'move', evaluate)
+  assert.equal(painted.length, 1, 'the first paint happens')
+
+  paintCursor(handle, 10, 20, 'move', evaluate)
+  assert.equal(painted.length, 1, 'an identical position is skipped')
+
+  paintCursor(handle, 30, 40, 'move', evaluate)
+  assert.equal(painted.length, 2, 'a new position paints')
+
+  // A click must always show its ripple, even at the position it already occupies.
+  paintCursor(handle, 30, 40, 'click', evaluate, undefined, true)
+  assert.equal(painted.length, 3, 'a forced paint ignores the cache')
+
+  forgetCursor(handle)
+  paintCursor(handle, 10, 20, 'move', evaluate)
+  assert.equal(painted.length, 4, 'after a navigation the pointer is drawn again')
 })

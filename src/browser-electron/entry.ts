@@ -16,7 +16,12 @@ import z from '@deepseek-ai/schemastery'
 import type { BrowserRuntime } from '../browser/runtime.js'
 import { ElectronBrowserProvider } from './provider.js'
 import type { ElectronBrowserViewHost } from './provider.js'
+import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { defaultHostMainPath, RemoteElectronViewHost } from './remote-host.js'
+import { DesktopBridgeViewHost } from './desktop-bridge-host.js'
+import { detectBrowser, SystemBrowserViewHost } from './system-browser.js'
 import { SettingsStore } from './settings-store.js'
 
 export {
@@ -61,30 +66,96 @@ export const Config: z<Config> = z.object({
 
 /** Register the Electron browser provider with `ctx.browser`. */
 export function apply(ctx: Context & { browser: BrowserRuntime }, config: Config): void {
-  // External host (desktop shell) wins; otherwise self-host. The self-hosted
-  // child is disposed with the fiber, mirroring the shell's lifetime.
-  const host: ElectronBrowserViewHost = config.viewHost ?? new RemoteElectronViewHost(defaultHostMainPath())
   // One settings document per plugin instance: the settings panel writes it, the
   // provider reads it live, and both ends agree on the same file.
   const settings = new SettingsStore()
-  // Own the disposer on THIS plugin's fiber: registerBrowserProvider's effect
-  // is bound to the seam's own fiber (the browser row), so a reload of this
-  // row would otherwise collide with the still-registered provider
-  // (BROWSER_DUPLICATE_PROVIDER) or leave a stale provider behind.
-  const unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, {
+  installSettingsRoute(ctx, settings)
+
+  const providerConfig = {
     httpOnly: config.httpOnly,
     downloadDir: config.downloadDir,
     snapshotMaxElements: config.snapshotMaxElements,
     contentMaxChars: config.contentMaxChars,
     settings: () => settings.get(),
-  }))
+  }
+
+  // A host supplied by the composition (the desktop shell's own seam) wins and is
+  // synchronous, so registration stays synchronous on that path.
+  if (config.viewHost !== undefined) {
+    const external = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(config.viewHost as ElectronBrowserViewHost, providerConfig))
+    ctx.effect(() => () => { external() })
+    return
+  }
+
+  // Otherwise start self-hosted — a working browser from the first call, on every
+  // surface — and upgrade to the desktop sidebar if this machine has one. The
+  // upgrade is deliberately a swap of the whole provider: the two carriers own
+  // different lifetimes (a spawned child vs. the shell's view), and pretending
+  // otherwise would leave a stray window behind.
+  const selfHosted = new RemoteElectronViewHost(defaultHostMainPath())
+  let unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(selfHosted, providerConfig))
+  let upgraded = false
+
   ctx.effect(() => () => {
     unregister()
-    if (config.viewHost === undefined && host instanceof RemoteElectronViewHost) {
-      host.dispose()
-    }
+    selfHosted.dispose()
   })
-  installSettingsRoute(ctx, settings)
+
+  /**
+   * Swap the provider to another carrier, releasing the previous one.
+   * @param host - the carrier to adopt.
+   * @param note - a one-line description for the log.
+   */
+  const adopt = (host: ElectronBrowserViewHost, note: string): void => {
+    if (upgraded) { host.dispose?.(); return }
+    upgraded = true
+    try {
+      unregister()
+      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(host, providerConfig))
+      selfHosted.dispose()
+      ctx.logger?.info?.(`dsh-builtin-browser: ${note}`)
+    } catch (error) {
+      // Never leave the surface without a provider.
+      unregister = ctx.browser.registerBrowserProvider(new ElectronBrowserProvider(
+        new RemoteElectronViewHost(defaultHostMainPath()), providerConfig))
+      ctx.logger?.warn?.(`dsh-builtin-browser: could not adopt ${note} (${String(error)})`)
+    }
+  }
+
+  // A browser the user explicitly asked for outranks every automatic choice: the
+  // whole point of the setting is that they know which browser they want. It is
+  // launched with a plugin-owned profile, so their own windows are untouched.
+  void (async () => {
+    const channel = settings.get().browser.channel
+    if (channel === 'bundled') return
+    const detected = detectBrowser(channel)
+    if (detected === undefined) {
+      ctx.logger?.warn?.(`dsh-builtin-browser: ${channel} was requested but no installation was found; using the bundled browser`)
+      return
+    }
+    const home = process.env.DSH_HOME ?? homedir()
+    // Login state lives in the browser profile, so the cookies setting decides where
+    // that profile goes: a stable directory keeps the user signed in across restarts
+    // (the point of using their own browser), while turning persistence off gets a
+    // throwaway directory that is removed when the browser is released.
+    const persist = settings.get().cookies.persist
+    const profileDir = persist
+      ? join(home, 'dsh-builtin-browser-host', `${detected.kind}-profile`)
+      : join(home, 'dsh-builtin-browser-host', `${detected.kind}-profile-ephemeral-${randomUUID()}`)
+    const host = await SystemBrowserViewHost.launch(detected, profileDir, [], persist ? undefined : profileDir)
+    if (host === undefined) {
+      ctx.logger?.warn?.(`dsh-builtin-browser: ${detected.kind} did not start; using the bundled browser`)
+      return
+    }
+    adopt(host, `driving the installed ${detected.kind} (${detected.path}${persist ? '' : ', ephemeral profile'})`)
+  })().catch(() => { /* the bundled browser stays in place */ })
+
+  void DesktopBridgeViewHost.discover().then(sidebar => {
+    // No bridge (plain `dsh web`, an older desktop build, or a shell that already
+    // exited): keep self-hosting, which is what every surface has always done.
+    if (sidebar === undefined) return
+    adopt(sidebar, 'driving the desktop sidebar browser')
+  }).catch(() => { /* discovery never throws; keep self-hosting */ })
 }
 
 /** Route the settings panel reads and writes. */
