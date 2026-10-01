@@ -50,7 +50,11 @@
  *   1. copies `plugin-browser-bridge.js` next to the app's main bundle;
  *   2. appends a guarded import to `lib/main.js` that starts it after `whenReady`,
  *      keeping a pristine `main.js.before-bridge` backup the first time;
- *   3. does nothing if the import is already present.
+ *   3. does nothing if the import is already present;
+ *   4. keeps `dsh <args>` working: the Desktop CLI launcher and the CLI's own
+ *      runtime lookup both spell `app.asar` out loud and both break once the
+ *      archive is moved aside, so both are patched (each with its own
+ *      `.before-bridge` backup) and `--revert` restores them.
  *
  * USAGE
  *   node desktop-bridge/install.mjs [path-to-DeepSeek-Harness-install]
@@ -73,6 +77,22 @@ const mainPath = join(appDir, 'lib', 'main.js')
 const bridgeTarget = join(appDir, 'lib', 'plugin-browser-bridge.js')
 const bridgeSource = join(import.meta.dirname, 'plugin-browser-bridge.js')
 const backupPath = `${mainPath}.before-bridge`
+
+// Moving the archive aside breaks two more places that spell `app.asar` out
+// loud, and both are used by `dsh <args>` (the Desktop CLI launcher and the
+// plugin manager behind it), so they are patched here and restored by --revert:
+//
+//   runtime/cli/bin/dsh.cmd                    launches the CLI by that path
+//   dsh/.../dsh-desktop-host/lib/cli.js        locates `runtime` by that name
+//
+// Without them the CLI dies with MODULE_NOT_FOUND even though the app itself
+// runs fine (the shell resolves everything through app.getAppPath()).
+const cliShimPath = join(resourcesDir, 'runtime', 'cli', 'bin', 'dsh.cmd')
+const cliShimBackup = `${cliShimPath}.before-bridge`
+const hostCliPath = join(appDir, 'dsh', 'node_modules', '@deepseek-ai', 'dsh-desktop-host', 'lib', 'cli.js')
+const hostCliBackup = `${hostCliPath}.before-bridge`
+const CLI_SHIM_MARKER = 'dsh-builtin-browser: resolve the app directory'
+const HOST_CLI_MARKER = 'dsh-builtin-browser: recognize an unpacked `app` directory'
 
 /** The exact block appended to main.js. Keep it recognisable: idempotence and
  *  reverting both key off this marker. */
@@ -157,6 +177,79 @@ function extractAsar(asar, outDir) {
   return { files, bytes, unpackedFiles }
 }
 
+/**
+ * Make the Desktop CLI launcher resolve the app directory instead of spelling
+ * `app.asar` out loud.
+ *
+ * `resources/runtime/cli/bin/dsh.cmd` is what the `dsh` command on PATH calls,
+ * and it launches the CLI through an `app.asar\…` path. Once the archive is
+ * moved aside that path is gone, so `dsh <args>` dies with MODULE_NOT_FOUND
+ * while the app itself keeps working (the shell resolves everything through
+ * `app.getAppPath()`). The patch touches only the app-directory fragment: the
+ * launcher keeps its own spelling of everything else, including the executable
+ * name, so a build whose binary is named differently still works.
+ *
+ * @returns what happened, for the install log.
+ */
+function patchCliShim() {
+  if (!existsSync(cliShimPath)) return 'launcher not present (skipped)'
+  const text = readFileSync(cliShimPath, 'utf8')
+  if (text.includes(CLI_SHIM_MARKER)) return 'already patched'
+  if (!/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/.test(text)) return 'unexpected launcher shape (skipped)'
+  if (!existsSync(cliShimBackup)) copyFileSync(cliShimPath, cliShimBackup)
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  const setLocal = /^.*setlocal.*$/m.exec(text)
+  const injection = [
+    `rem ${CLI_SHIM_MARKER} (resources\\app when the bridge is installed,`,
+    'rem resources\\app.asar on a stock installation).',
+    'set "DSH_APP=%~dp0..\\..\\..\\app"',
+    'if not exist "%DSH_APP%\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\cli.js" set "DSH_APP=%~dp0..\\..\\..\\app.asar"',
+  ].join(eol)
+  const withVariables = setLocal === null
+    ? `${injection}${eol}${text}`
+    : text.replace(setLocal[0], `${setLocal[0]}${eol}${injection}`)
+  writeFileSync(cliShimPath, withVariables.replace(/%~dp0(?:\.\.\\)+app\.asar\\dsh\\/, '%DSH_APP%\\dsh\\'))
+  return 'patched'
+}
+
+/**
+ * Teach the Desktop CLI where its `runtime` directory is when the app is an
+ * unpacked `app` directory rather than `app.asar`.
+ *
+ * `dsh-desktop-host/lib/cli.js` derives the directory that holds pnpm as
+ * `dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir)`, and
+ * `runtimeArchivePath` only recognises a parent literally named `app.asar`.
+ * With the app at `resources/app` that falls back to one level too few and
+ * resolves `resources/app/runtime`, which does not exist — so the plugin
+ * manager behind `dsh plugin …` cannot start.
+ *
+ * @returns what happened, for the install log.
+ */
+function patchHostCli() {
+  if (!existsSync(hostCliPath)) return 'cli.js not present (skipped)'
+  const text = readFileSync(hostCliPath, 'utf8')
+  if (text.includes(HOST_CLI_MARKER)) return 'already patched'
+  const before = '\tawait runDesktopCli(runtimeDir, join(dirname(runtimeArchivePath(runtimeDir) ?? runtimeDir), "runtime"));'
+  if (!text.includes(before)) return 'unexpected cli.js shape (skipped)'
+  if (!existsSync(hostCliBackup)) copyFileSync(hostCliPath, hostCliBackup)
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  const after = [
+    `\t// ${HOST_CLI_MARKER} as the app root,`,
+    '\t// so an installation whose app.asar was moved aside still finds its runtime.',
+    '\tconst cliOwnerDir = dirname(runtimeDir);',
+    '\tconst cliSupportRoot = basename(cliOwnerDir) === "app" || basename(cliOwnerDir) === "app.asar" ? dirname(cliOwnerDir) : cliOwnerDir;',
+    '\tawait runDesktopCli(runtimeDir, join(cliSupportRoot, "runtime"));',
+  ].join(eol)
+  writeFileSync(hostCliPath, text.replace(before, after))
+  return 'patched'
+}
+
+/** Apply both CLI compatibility patches and report them. */
+function installCliCompatibility() {
+  console.log(`  cli launcher:           ${patchCliShim()}`)
+  console.log(`  cli runtime resolution: ${patchHostCli()}`)
+}
+
 // The archive wins whenever it exists, so ITS presence — not the absence of the
 // directory — decides the layout. After a desktop update the archive is back
 // (a new build) while an older extraction is still lying around, and keying off
@@ -182,6 +275,16 @@ if (revert) {
   if (existsSync(backupPath)) {
     copyFileSync(backupPath, mainPath)
     console.log(`restored ${mainPath} from ${backupPath}`)
+    reverted = true
+  }
+  if (existsSync(cliShimBackup)) {
+    copyFileSync(cliShimBackup, cliShimPath)
+    console.log(`restored the CLI launcher: ${cliShimPath}`)
+    reverted = true
+  }
+  if (existsSync(hostCliBackup) && existsSync(dirname(hostCliPath))) {
+    copyFileSync(hostCliBackup, hostCliPath)
+    console.log(`restored the CLI runtime resolution: ${hostCliPath}`)
     reverted = true
   }
   if (!reverted) {
@@ -230,6 +333,7 @@ const current = readFileSync(mainPath, 'utf8')
 if (current.includes(MARKER)) {
   console.log('bridge already installed (main.js carries the marker); refreshing the module copy')
   copyFileSync(bridgeSource, bridgeTarget)
+  installCliCompatibility()
   process.exit(0)
 }
 
@@ -252,4 +356,5 @@ copyFileSync(bridgeSource, bridgeTarget)
 console.log(`installed bridge into ${appDir}`)
 console.log(`  module: ${bridgeTarget}`)
 console.log(`  patch:  ${mainPath} (+${SNIPPET.split('\n').length} lines)`)
+installCliCompatibility()
 console.log('restart DSH Desktop to activate it.')
